@@ -27,6 +27,7 @@ class Match(Base):
     opponent_archetype = Column(String(255), nullable=False)  
     player = Column(String(255), nullable=False)  
     deck = relationship('Deck', back_populates='matches')
+    
 User.decks = relationship('Deck', order_by=Deck.id, back_populates='user')
 Deck.matches = relationship('Match', order_by=Match.id, back_populates='deck')
 
