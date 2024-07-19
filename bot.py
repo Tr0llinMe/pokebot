@@ -25,6 +25,7 @@ async def on_ready():
     print(f'Bot is ready. Logged in as {bot.user}')
 
 @bot.command()
+@commands.dm_only()
 async def register(ctx):
     discord_id = str(ctx.author.id)
     username = str(ctx.author)
@@ -39,6 +40,7 @@ async def register(ctx):
         await ctx.send('You have been registered.')
 
 @bot.command()
+@commands.dm_only()
 async def add_deck(ctx, deck_name, archetype):
     discord_id = str(ctx.author.id)
     session = Session()
@@ -75,12 +77,19 @@ async def log_match(ctx, deck_name, result, opponent_archetype):
         
         
 @bot.command()
+@commands.guild_only()
 async def matchup_spread(ctx, archetype):
     session = Session()
-    matches = session.query(Match).join(Deck).filter(Deck.archetype == archetype).all()
+    guild_id = ctx.guild.id
+    users = session.query(User).all()
+    user_ids = [user.id for user in users if user.discord_id in [str(member.id) for member in ctx.guild.members]]
+    decks = session.query(Deck).filter(Deck.user_id.in_(user_ids), Deck.archetype == archetype).all()
+    deck_ids = [deck.id for deck in decks]
+    matches = session.query(Match).filter(Match.deck_id.in_(deck_ids)).all()
+    
     if matches:
-        wins = sum(1 for match in matches if match.result == 'win')
-        losses = sum(1 for match in matches if match.result == 'loss')
+        wins = sum(1 for match in matches if match.result.lower() in ['win','won'])
+        losses = sum(1 for match in matches if match.result.lower() in ['lose', 'lost'])
         response = f'Matchup spread for archetype "{archetype}": {wins} wins and {losses} losses.\n\n'
         response += 'Detailed matchups:\n'
         for match in matches:
