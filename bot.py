@@ -2,10 +2,10 @@ import discord
 from discord.ext import commands
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from config import DATABASE_URI 
-from models import Base, User, Deck, Match
-from dotenv import load_dotenv
+from config import DATABASE_URI, OWNER_ID, DISCORD_TOKEN 
+from models import Base, User, Deck, Match, DeckArchetype
 import os
+import re
 
 # Define intents
 intents = discord.Intents.default()
@@ -25,7 +25,6 @@ async def on_ready():
     print(f'Bot is ready. Logged in as {bot.user}')
 
 @bot.command()
-@commands.dm_only()
 async def register(ctx):
     discord_id = str(ctx.author.id)
     username = str(ctx.author)
@@ -39,21 +38,105 @@ async def register(ctx):
         session.commit()
         await ctx.send('You have been registered.')
 
+def normalize_text(text):
+    return text.replace(' ', '').lower()
+
 @bot.command()
 @commands.dm_only()
-async def add_deck(ctx, deck_name, archetype):
+async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
     discord_id = str(ctx.author.id)
     session = Session()
     user = session.query(User).filter_by(discord_id=discord_id).first()
-    if user:
-        new_deck = Deck(user_id=user.id, name=deck_name, archetype=archetype)
-        session.add(new_deck)
-        session.commit()
-        await ctx.send(f'Deck "{deck_name}" with archetype "{archetype}" has been added.')
-        print(f'Deck "{deck_name}" with archetype "{archetype}" added for user {user.username}.')
-    else:
+
+    if not user:
         await ctx.send('You need to register first.')
-        print(f'User {ctx.author} needs to register first.')
+        return
+
+    if not deck_name:
+        await ctx.send('Please provide a deck name using the format `!add_deck <deck_name>`.')
+        return
+
+    archetypes = session.query(DeckArchetype).all()
+    archetype_names = [archetype.name for archetype in archetypes]
+
+    if deck_file is None:
+        await ctx.send(f'Please provide a deck text file or choose from the available archetypes: {", ".join(archetype_names)}.')
+        return
+
+    # Define the upload directory and ensure it exists
+    upload_dir = 'uploads'
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # Create a filename using user ID and deck name
+    sanitized_deck_name = re.sub(r'\W+', '_', deck_name)  # Replace non-alphanumeric characters with underscores
+    filename = f"{discord_id}_{sanitized_deck_name}.txt"
+    file_path = os.path.join(upload_dir, filename)
+
+    # Save the deck file to the uploads directory
+    await deck_file.save(file_path)
+
+    # Read the deck file
+    with open(file_path, 'r') as file:
+        deck_content = file.read()
+
+    # Extract card names from the deck file
+    cards = re.findall(r'\d+ ([\w\s{}]+)', deck_content)
+    cards = [normalize_text(card) for card in cards]
+
+    # Identify the archetype
+    identified_archetype = 'Others'
+    for archetype in archetypes:
+        archetype_cards = [normalize_text(card) for card in archetype.key_cards.split(',')]
+        if all(any(ac in card for card in cards) for ac in archetype_cards):
+            identified_archetype = archetype.name
+            break
+
+    # Ensure "Others" archetype exists
+    others_archetype = session.query(DeckArchetype).filter_by(name='Others').first()
+    if others_archetype is None:
+        others_archetype = DeckArchetype(name='Others', key_cards='')
+        session.add(others_archetype)
+        session.commit()
+
+    # Get the archetype ID
+    archetype_entry = session.query(DeckArchetype).filter_by(name=identified_archetype).first()
+    if archetype_entry is None:
+        archetype_entry = others_archetype
+
+    # Add the deck to the database
+    new_deck = Deck(user_id=user.id, name=deck_name, archetype_id=archetype_entry.id)
+    session.add(new_deck)
+    session.commit()
+
+    await ctx.send(f'Deck "{deck_name}" has been added with the identified archetype "{identified_archetype}".')
+
+
+@bot.command()
+@commands.dm_only()
+async def add_archetype(ctx):
+    if str(ctx.author.id) != OWNER_ID:
+        await ctx.send('You are not authorized to add archetypes.')
+        return
+
+    await ctx.send('Please enter the archetype name:')
+    
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    archetype_name = await bot.wait_for('message', check=check)
+    
+    await ctx.send('Please enter the key cards for the archetype, separated by commas:')
+    key_cards_message = await bot.wait_for('message', check=check)
+    
+    key_cards = key_cards_message.content.split(',')
+    key_cards = [card.strip() for card in key_cards]
+
+    session = Session()
+    new_archetype = DeckArchetype(name=archetype_name.content, key_cards=','.join(key_cards))
+    session.add(new_archetype)
+    session.commit()
+    
+    await ctx.send(f'Archetype "{archetype_name.content}" has been added with key cards: {", ".join(key_cards)}')
 
 @bot.command()
 async def log_match(ctx, deck_name, result, opponent_archetype):
@@ -75,7 +158,7 @@ async def log_match(ctx, deck_name, result, opponent_archetype):
         await ctx.send('You need to register first.')
         print(f'User {ctx.author} needs to register first.')
         
-        
+                
 @bot.command()
 @commands.guild_only()
 async def matchup_spread(ctx, archetype):
@@ -100,5 +183,4 @@ async def matchup_spread(ctx, archetype):
         await ctx.send(f'No matches found for archetype "{archetype}".')
         print(f'No matches found for archetype "{archetype}".')
 
-bot_token = os.getenv('DISCORD_TOKEN')
-bot.run(bot_token)
+bot.run(DISCORD_TOKEN)

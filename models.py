@@ -17,8 +17,14 @@ class Deck(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'))
     name = Column(String(255), nullable=False)
-    archetype = Column(String(255), nullable=False)  
+    archetype_id = Column(Integer, ForeignKey('deck_archetypes.id'))
+    archetype = relationship('DeckArchetype')
     user = relationship('User', back_populates='decks')
+class DeckArchetype(Base):
+    __tablename__ = 'deck_archetypes'
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    key_cards = Column(String(2000), nullable=False) #Seperate cards by commas
 class Match(Base):
     __tablename__ = 'matches'
     id = Column(Integer, primary_key=True)
