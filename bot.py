@@ -171,8 +171,8 @@ async def matchup_spread(ctx, archetype):
     matches = session.query(Match).filter(Match.deck_id.in_(deck_ids)).all()
     
     if matches:
-        wins = sum(1 for match in matches if match.result.lower() in ['win','won'])
-        losses = sum(1 for match in matches if match.result.lower() in ['lose', 'lost'])
+        wins = sum(1 for match in matches if match.result.lower() in ['win','won','w'])
+        losses = sum(1 for match in matches if match.result.lower() in ['lose', 'lost','l'])
         response = f'Matchup spread for archetype "{archetype}": {wins} wins and {losses} losses.\n\n'
         response += 'Detailed matchups:\n'
         for match in matches:
