@@ -1,6 +1,7 @@
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
+from datetime import datetime
 
 from config import DATABASE_URI
 
@@ -32,6 +33,7 @@ class Match(Base):
     result = Column(String(255), nullable=False)
     opponent_archetype = Column(String(255), nullable=False)  
     player = Column(String(255), nullable=False)  
+    date = Column(Date, default=datetime.now().strftime('%Y-%m-%d'))
     deck = relationship('Deck', back_populates='matches')
     
 User.decks = relationship('Deck', order_by=Deck.id, back_populates='user')
