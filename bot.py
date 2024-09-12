@@ -6,6 +6,7 @@ from config import DATABASE_URI, OWNER_ID, DISCORD_TOKEN
 from models import Base, User, Deck, Match, DeckArchetype
 import os
 import re
+from datetime import datetime
 
 # Define intents
 intents = discord.Intents.default()
@@ -24,7 +25,16 @@ Session = sessionmaker(bind=engine)
 async def on_ready():
     print(f'Bot is ready. Logged in as {bot.user}')
 
-@bot.command()
+def normalize_text(text):
+    return text.replace(' ', '').lower()
+
+### USER GROUP ###
+@bot.group()
+async def user(ctx):
+    if ctx.invoked_subcommand is None:
+        await ctx.send('Please specify a subcommand for user, e.g., "!user register".')
+    
+@user.command(name='register')
 async def register(ctx):
     discord_id = str(ctx.author.id)
     username = str(ctx.author)
@@ -38,10 +48,13 @@ async def register(ctx):
         session.commit()
         await ctx.send('You have been registered.')
 
-def normalize_text(text):
-    return text.replace(' ', '').lower()
+### DECK GROUP ###
+@bot.group()
+async def add(ctx):
+    if ctx.invoked_subcommand is None:
+        await ctx.send('Please specify a subcommand for user, e.g., "!add deck".')
 
-@bot.command()
+@add.command(name='deck')
 @commands.dm_only()
 async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
     discord_id = str(ctx.author.id)
@@ -110,9 +123,7 @@ async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
 
     await ctx.send(f'Deck "{deck_name}" has been added with the identified archetype "{identified_archetype}".')
 
-
-@bot.command()
-@commands.dm_only()
+@add.command(name='archetype')
 async def add_archetype(ctx):
     if str(ctx.author.id) != OWNER_ID:
         await ctx.send('You are not authorized to add archetypes.')
@@ -138,47 +149,108 @@ async def add_archetype(ctx):
     
     await ctx.send(f'Archetype "{archetype_name.content}" has been added with key cards: {", ".join(key_cards)}')
 
-@bot.command()
-async def log_match(ctx, deck_name, result, opponent_archetype):
+### MATCH GROUP ###
+@bot.group()
+async def add(ctx):
+    if ctx.invoked_subcommand is None:
+        await ctx.send('Please specify a subcommand for user, e.g., "!match log".')
+
+@match.command(name='log')
+async def log_match(ctx, deck_name, result):
     discord_id = str(ctx.author.id)
     session = Session()
     user = session.query(User).filter_by(discord_id=discord_id).first()
-    if user:
-        deck = session.query(Deck).filter_by(user_id=user.id, name=deck_name).first()
-        if deck:
-            new_match = Match(deck_id=deck.id, result=result, opponent_archetype=opponent_archetype, player=user.username)
-            session.add(new_match)
-            session.commit()
-            await ctx.send(f'Match for deck "{deck_name}" with result "{result}" against archetype "{opponent_archetype}" logged.')
-            print(f'Match for deck "{deck_name}" with result "{result}" against archetype "{opponent_archetype}" logged for user {user.username}.')
-        else:
-            await ctx.send('Deck not found.')
-            print(f'Deck "{deck_name}" not found for user {user.username}.')
-    else:
+
+    if not user:
         await ctx.send('You need to register first.')
-        print(f'User {ctx.author} needs to register first.')
+        return
+
+    deck = session.query(Deck).filter_by(user_id=user.id, name=deck_name).first()
+    if not deck:
+        await ctx.send('Deck not found.')
+        return
+
+    # Standardize the result input
+    win_conditions = ['won', 'win', '1']
+    loss_conditions = ['lost', 'lose', '2']
+    if result.lower() in win_conditions:
+        standardized_result = 'Win'
+    elif result.lower() in loss_conditions:
+        standardized_result = 'Loss'
+    else:
+        await ctx.send('Invalid result. Please enter "won", "win", "lost", "lose", "1", or "2".')
+        return
+
+    # Retrieve archetype options from the database
+    archetypes = session.query(DeckArchetype).order_by(DeckArchetype.name).all()
+    archetype_names = [archetype.name for archetype in archetypes if archetype.name != 'Others']
+    archetype_names.append('Others')  # Ensure "Others" is the last option
+
+    # Prompt the user to select an opponent archetype
+    await ctx.send(f'Please select the opponent archetype:\n' +
+                   '\n'.join(f'{i + 1}. {name}' for i, name in enumerate(archetype_names)))
+
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        msg = await bot.wait_for('message', check=check, timeout=60.0)
+        selected_index = int(msg.content) - 1
+        if 0 <= selected_index < len(archetype_names):
+            opponent_archetype = archetype_names[selected_index]
+        else:
+            await ctx.send('Invalid selection. Please try logging the match again.')
+            return
+    except ValueError:
+        await ctx.send('Invalid input. Please enter the number corresponding to the archetype.')
+        return
+    except asyncio.TimeoutError:
+        await ctx.send('You took too long to respond. Please try logging the match again.')
+        return
+
+    # Get the current date
+    current_date = datetime.now().strftime('%m-%d-%Y')
+
+    # Log the match in the database
+    new_match = Match(deck_id=deck.id, result=standardized_result, opponent_archetype=opponent_archetype, player=user.username, date=current_date)
+    session.add(new_match)
+    session.commit()
+
+    await ctx.send(f'Match for deck "{deck_name}" with result "{standardized_result}" against archetype "{opponent_archetype}" logged on {current_date}.')
+    print(f'Match for deck "{deck_name}" with result "{standardized_result}" against archetype "{opponent_archetype}" logged for user {user.username} on {current_date}.')
         
                 
-@bot.command()
+@match.command(name='history')
 @commands.guild_only()
-async def matchup_spread(ctx, archetype):
+async def matchup_history(ctx, archetype):
     session = Session()
     guild_id = ctx.guild.id
+
+    # Get users from the guild
     users = session.query(User).all()
     user_ids = [user.id for user in users if user.discord_id in [str(member.id) for member in ctx.guild.members]]
+    
+    # Get decks that match the provided archetype
     decks = session.query(Deck).filter(Deck.user_id.in_(user_ids), Deck.archetype == archetype).all()
     deck_ids = [deck.id for deck in decks]
-    matches = session.query(Match).filter(Match.deck_id.in_(deck_ids)).all()
     
+    # Get matches related to the filtered decks
+    matches = session.query(Match).filter(Match.deck_id.in_(deck_ids)).all()
+
     if matches:
-        wins = sum(1 for match in matches if match.result.lower() in ['win','won','w'])
-        losses = sum(1 for match in matches if match.result.lower() in ['lose', 'lost','l'])
-        response = f'Matchup spread for archetype "{archetype}": {wins} wins and {losses} losses.\n\n'
+        # Calculate wins and losses (assuming "Win" and "Loss" are the only possible values)
+        wins = sum(1 for match in matches if match.result == 'Win')
+        losses = sum(1 for match in matches if match.result == 'Loss')
+
+        # Prepare response message
+        response = f'Matchup history for archetype "{archetype}": {wins} wins and {losses} losses.\n\n'
         response += 'Detailed matchups:\n'
         for match in matches:
-            response += f'Player: {match.player}, Deck: {match.deck.name}, Result: {match.result}, Opponent Archetype: {match.opponent_archetype}\n'
+            response += f'Player: {match.player}, Result: {match.result}, Opponent Archetype: {match.opponent_archetype}\n'
+        
+        # Send the response to the user
         await ctx.send(response)
-        print(f'Provided matchup spread for archetype "{archetype}".')
+        print(f'Provided matchup history for archetype "{archetype}".')
     else:
         await ctx.send(f'No matches found for archetype "{archetype}".')
         print(f'No matches found for archetype "{archetype}".')
