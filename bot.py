@@ -66,7 +66,7 @@ async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
         return
 
     if not deck_name:
-        await ctx.send('Please provide a deck name using the format `!add_deck <deck_name>`.')
+        await ctx.send('Please provide a deck name using the format `!add deck <deck_name>`.')
         return
 
     archetypes = session.query(DeckArchetype).all()
@@ -124,6 +124,7 @@ async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
     await ctx.send(f'Deck "{deck_name}" has been added with the identified archetype "{identified_archetype}".')
 
 @add.command(name='archetype')
+@commands.dm_only()
 async def add_archetype(ctx):
     if str(ctx.author.id) != OWNER_ID:
         await ctx.send('You are not authorized to add archetypes.')
@@ -151,7 +152,7 @@ async def add_archetype(ctx):
 
 ### MATCH GROUP ###
 @bot.group()
-async def add(ctx):
+async def match(ctx):
     if ctx.invoked_subcommand is None:
         await ctx.send('Please specify a subcommand for user, e.g., "!match log".')
 
@@ -254,5 +255,14 @@ async def matchup_history(ctx, archetype):
     else:
         await ctx.send(f'No matches found for archetype "{archetype}".')
         print(f'No matches found for archetype "{archetype}".')
+        
+        
+### TOOL GROUP ###
+@bot.group()
+async def tool(ctx):
+    if ctx.invoked_subcommand is None:
+        await ctx.send('Please specify a subcommand for user, e.g., "!tool mully".')
+        
+#@tool.command(name='mully')
 
 bot.run(DISCORD_TOKEN)
