@@ -1,9 +1,8 @@
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Date
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, sessionmaker
+from sqlalchemy.orm import relationship
 from datetime import datetime
-
-from config import DATABASE_URI
+from config import supabase
 
 Base = declarative_base()
 
@@ -38,7 +37,3 @@ class Match(Base):
     
 User.decks = relationship('Deck', order_by=Deck.id, back_populates='user')
 Deck.matches = relationship('Match', order_by=Match.id, back_populates='deck')
-
-engine = create_engine(DATABASE_URI)
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)

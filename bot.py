@@ -2,8 +2,9 @@ import discord
 from discord.ext import commands
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from config import DATABASE_URI, OWNER_ID, DISCORD_TOKEN 
+from config import supabase, OWNER_ID, DISCORD_TOKEN 
 from models import Base, User, Deck, Match, DeckArchetype
+import asyncio
 import os
 import re
 from datetime import datetime
@@ -17,9 +18,6 @@ intents.message_content = True
 
 # Create bot instance with intents
 bot = commands.Bot(command_prefix='!', intents=intents)
-
-engine = create_engine(DATABASE_URI)
-Session = sessionmaker(bind=engine)
 
 @bot.event
 async def on_ready():
@@ -38,14 +36,14 @@ async def user(ctx):
 async def register(ctx):
     discord_id = str(ctx.author.id)
     username = str(ctx.author)
-    session = Session()
-    user = session.query(User).filter_by(discord_id=discord_id).first()
-    if user:
+    
+    # Check if user already exists in Supabase
+    response = supabase.table('users').select("*").eq('discord_id', discord_id).execute()
+    if response.data:
         await ctx.send('You are already registered.')
     else:
-        new_user = User(discord_id=discord_id, username=username)
-        session.add(new_user)
-        session.commit()
+        # Insert new user
+        supabase.table('users').insert({"discord_id": discord_id, "username": username}).execute()
         await ctx.send('You have been registered.')
 
 ### DECK GROUP ###
@@ -58,10 +56,10 @@ async def add(ctx):
 @commands.dm_only()
 async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
     discord_id = str(ctx.author.id)
-    session = Session()
-    user = session.query(User).filter_by(discord_id=discord_id).first()
 
-    if not user:
+    # Check if user is registered
+    user_response = supabase.table('users').select("*").eq('discord_id', discord_id).execute()
+    if not user_response.data:
         await ctx.send('You need to register first.')
         return
 
@@ -69,57 +67,50 @@ async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
         await ctx.send('Please provide a deck name using the format `!add deck <deck_name>`.')
         return
 
-    archetypes = session.query(DeckArchetype).all()
-    archetype_names = [archetype.name for archetype in archetypes]
+    # Get archetypes
+    archetype_response = supabase.table('deck_archetypes').select("*").execute()
+    archetype_names = [archetype['name'] for archetype in archetype_response.data]
 
     if deck_file is None:
         await ctx.send(f'Please provide a deck text file or choose from the available archetypes: {", ".join(archetype_names)}.')
         return
 
-    # Define the upload directory and ensure it exists
+    # Save the deck file
     upload_dir = 'uploads'
     os.makedirs(upload_dir, exist_ok=True)
-
-    # Create a filename using user ID and deck name
-    sanitized_deck_name = re.sub(r'\W+', '_', deck_name)  # Replace non-alphanumeric characters with underscores
-    filename = f"{discord_id}_{sanitized_deck_name}.txt"
-    file_path = os.path.join(upload_dir, filename)
-
-    # Save the deck file to the uploads directory
+    sanitized_deck_name = re.sub(r'\W+', '_', deck_name)
+    file_path = os.path.join(upload_dir, f"{discord_id}_{sanitized_deck_name}.txt")
     await deck_file.save(file_path)
 
-    # Read the deck file
+    # Read and process the deck file
     with open(file_path, 'r') as file:
         deck_content = file.read()
 
-    # Extract card names from the deck file
+    # Extract card names
     cards = re.findall(r'\d+ ([\w\s{}]+)', deck_content)
     cards = [normalize_text(card) for card in cards]
 
-    # Identify the archetype
+    # Identify archetype
     identified_archetype = 'Others'
-    for archetype in archetypes:
-        archetype_cards = [normalize_text(card) for card in archetype.key_cards.split(',')]
+    for archetype in archetype_response.data:
+        archetype_cards = [normalize_text(card) for card in archetype['key_cards'].split(',')]
         if all(any(ac in card for card in cards) for ac in archetype_cards):
-            identified_archetype = archetype.name
+            identified_archetype = archetype['name']
             break
 
     # Ensure "Others" archetype exists
-    others_archetype = session.query(DeckArchetype).filter_by(name='Others').first()
-    if others_archetype is None:
-        others_archetype = DeckArchetype(name='Others', key_cards='')
-        session.add(others_archetype)
-        session.commit()
-
-    # Get the archetype ID
-    archetype_entry = session.query(DeckArchetype).filter_by(name=identified_archetype).first()
-    if archetype_entry is None:
-        archetype_entry = others_archetype
+    others_archetype = supabase.table('deck_archetypes').select("*").eq('name', 'Others').execute()
+    if not others_archetype.data:
+        supabase.table('deck_archetypes').insert({"name": "Others", "key_cards": ""}).execute()
 
     # Add the deck to the database
-    new_deck = Deck(user_id=user.id, name=deck_name, archetype_id=archetype_entry.id)
-    session.add(new_deck)
-    session.commit()
+    user_id = user_response.data[0]['id']
+    archetype_entry = next((a for a in archetype_response.data if a['name'] == identified_archetype), None)
+    supabase.table('decks').insert({
+        "user_id": user_id,
+        "name": deck_name,
+        "archetype_id": archetype_entry['id'] if archetype_entry else None
+    }).execute()
 
     await ctx.send(f'Deck "{deck_name}" has been added with the identified archetype "{identified_archetype}".')
 
@@ -130,25 +121,42 @@ async def add_archetype(ctx):
         await ctx.send('You are not authorized to add archetypes.')
         return
 
+    # Prompt user for archetype name
     await ctx.send('Please enter the archetype name:')
     
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
-    archetype_name = await bot.wait_for('message', check=check)
-    
+    try:
+        archetype_name = await bot.wait_for('message', check=check, timeout=60.0)
+    except asyncio.TimeoutError:
+        await ctx.send('You took too long to respond. Please try again.')
+        return
+
+    # Prompt user for key cards
     await ctx.send('Please enter the key cards for the archetype, separated by commas:')
-    key_cards_message = await bot.wait_for('message', check=check)
     
+    try:
+        key_cards_message = await bot.wait_for('message', check=check, timeout=60.0)
+    except asyncio.TimeoutError:
+        await ctx.send('You took too long to respond. Please try again.')
+        return
+    
+    # Process the key cards
     key_cards = key_cards_message.content.split(',')
     key_cards = [card.strip() for card in key_cards]
 
-    session = Session()
-    new_archetype = DeckArchetype(name=archetype_name.content, key_cards=','.join(key_cards))
-    session.add(new_archetype)
-    session.commit()
-    
-    await ctx.send(f'Archetype "{archetype_name.content}" has been added with key cards: {", ".join(key_cards)}')
+    # Add the archetype to the database using Supabase
+    response = supabase.table('deck_archetypes').insert({
+        "name": archetype_name.content,
+        "key_cards": ','.join(key_cards)
+    }).execute()
+
+    if response.error:
+        await ctx.send('An error occurred while adding the archetype. Please try again later.')
+        print(f"Error adding archetype: {response.error}")
+    else:
+        await ctx.send(f'Archetype "{archetype_name.content}" has been added with key cards: {", ".join(key_cards)}')
 
 ### MATCH GROUP ###
 @bot.group()
@@ -159,17 +167,22 @@ async def match(ctx):
 @match.command(name='log')
 async def log_match(ctx, deck_name, result):
     discord_id = str(ctx.author.id)
-    session = Session()
-    user = session.query(User).filter_by(discord_id=discord_id).first()
 
-    if not user:
+    # Check if the user is registered
+    user_response = supabase.table('users').select("*").eq('discord_id', discord_id).execute()
+    if not user_response.data:
         await ctx.send('You need to register first.')
         return
 
-    deck = session.query(Deck).filter_by(user_id=user.id, name=deck_name).first()
-    if not deck:
+    user = user_response.data[0]  # Get the user object
+
+    # Check if the deck exists for the user
+    deck_response = supabase.table('decks').select("*").eq('user_id', user['id']).eq('name', deck_name).execute()
+    if not deck_response.data:
         await ctx.send('Deck not found.')
         return
+
+    deck = deck_response.data[0]  # Get the deck object
 
     # Standardize the result input
     win_conditions = ['won', 'win', '1']
@@ -182,9 +195,10 @@ async def log_match(ctx, deck_name, result):
         await ctx.send('Invalid result. Please enter "won", "win", "lost", "lose", "1", or "2".')
         return
 
-    # Retrieve archetype options from the database
-    archetypes = session.query(DeckArchetype).order_by(DeckArchetype.name).all()
-    archetype_names = [archetype.name for archetype in archetypes if archetype.name != 'Others']
+    # Retrieve archetypes from the database
+    archetypes_response = supabase.table('deck_archetypes').select("*").execute()
+    archetypes = archetypes_response.data
+    archetype_names = [archetype['name'] for archetype in archetypes if archetype['name'] != 'Others']
     archetype_names.append('Others')  # Ensure "Others" is the last option
 
     # Prompt the user to select an opponent archetype
@@ -210,51 +224,76 @@ async def log_match(ctx, deck_name, result):
         return
 
     # Get the current date
-    current_date = datetime.now().strftime('%m-%d-%Y')
+    current_date = datetime.now().strftime('%Y-%m-%d')
 
     # Log the match in the database
-    new_match = Match(deck_id=deck.id, result=standardized_result, opponent_archetype=opponent_archetype, player=user.username, date=current_date)
-    session.add(new_match)
-    session.commit()
+    match_response = supabase.table('matches').insert({
+        "deck_id": deck['id'],
+        "result": standardized_result,
+        "opponent_archetype": opponent_archetype,
+        "player": user['username'],
+        "date": current_date
+    }).execute()
 
-    await ctx.send(f'Match for deck "{deck_name}" with result "{standardized_result}" against archetype "{opponent_archetype}" logged on {current_date}.')
-    print(f'Match for deck "{deck_name}" with result "{standardized_result}" against archetype "{opponent_archetype}" logged for user {user.username} on {current_date}.')
+    if match_response.error:
+        await ctx.send('An error occurred while logging the match. Please try again later.')
+        print(f"Error logging match: {match_response.error}")
+    else:
+        await ctx.send(f'Match for deck "{deck_name}" with result "{standardized_result}" against archetype "{opponent_archetype}" logged on {current_date}.')
+        print(f'Match for deck "{deck_name}" with result "{standardized_result}" against archetype "{opponent_archetype}" logged for user {user["username"]} on {current_date}.')
         
                 
 @match.command(name='history')
 @commands.guild_only()
 async def matchup_history(ctx, archetype):
-    session = Session()
     guild_id = ctx.guild.id
 
-    # Get users from the guild
-    users = session.query(User).all()
-    user_ids = [user.id for user in users if user.discord_id in [str(member.id) for member in ctx.guild.members]]
-    
-    # Get decks that match the provided archetype
-    decks = session.query(Deck).filter(Deck.user_id.in_(user_ids), Deck.archetype == archetype).all()
-    deck_ids = [deck.id for deck in decks]
-    
+    # Get all users from the guild
+    guild_members = [str(member.id) for member in ctx.guild.members]
+    users_response = supabase.table('users').select("*").execute()
+
+    if not users_response.data:
+        await ctx.send(f"No users are registered.")
+        return
+
+    # Filter users who are members of the guild
+    user_ids = [user['id'] for user in users_response.data if user['discord_id'] in guild_members]
+
+    if not user_ids:
+        await ctx.send(f"No registered users found in this guild.")
+        return
+
+    # Get decks matching the archetype and users in the guild
+    decks_response = supabase.table('decks').select("*").eq("archetype_id", archetype).in_("user_id", user_ids).execute()
+
+    if not decks_response.data:
+        await ctx.send(f"No decks found for archetype '{archetype}'.")
+        return
+
+    deck_ids = [deck['id'] for deck in decks_response.data]
+
     # Get matches related to the filtered decks
-    matches = session.query(Match).filter(Match.deck_id.in_(deck_ids)).all()
+    matches_response = supabase.table('matches').select("*").in_("deck_id", deck_ids).execute()
 
-    if matches:
-        # Calculate wins and losses (assuming "Win" and "Loss" are the only possible values)
-        wins = sum(1 for match in matches if match.result == 'Win')
-        losses = sum(1 for match in matches if match.result == 'Loss')
+    if not matches_response.data:
+        await ctx.send(f"No matches found for archetype '{archetype}'.")
+        return
 
-        # Prepare response message
-        response = f'Matchup history for archetype "{archetype}": {wins} wins and {losses} losses.\n\n'
-        response += 'Detailed matchups:\n'
-        for match in matches:
-            response += f'Player: {match.player}, Result: {match.result}, Opponent Archetype: {match.opponent_archetype}\n'
-        
-        # Send the response to the user
-        await ctx.send(response)
-        print(f'Provided matchup history for archetype "{archetype}".')
-    else:
-        await ctx.send(f'No matches found for archetype "{archetype}".')
-        print(f'No matches found for archetype "{archetype}".')
+    matches = matches_response.data
+
+    # Calculate wins and losses
+    wins = sum(1 for match in matches if match['result'] == 'Win')
+    losses = sum(1 for match in matches if match['result'] == 'Loss')
+
+    # Prepare the response message
+    response = f'Matchup history for archetype "{archetype}": {wins} wins and {losses} losses.\n\n'
+    response += 'Detailed matchups:\n'
+    for match in matches:
+        response += f'Player: {match["player"]}, Result: {match["result"]}, Opponent Archetype: {match["opponent_archetype"]}\n'
+
+    # Send the response to the user
+    await ctx.send(response)
+    print(f'Provided matchup history for archetype "{archetype}".')
         
         
 ### TOOL GROUP ###
