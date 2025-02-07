@@ -1,0 +1,22 @@
+## ONLY USED FOR DEBUGGING OTHER DECKLIST THAT ARE UNKNOWN ## 
+        
+        # Extract using the extract function
+        cards = extract_card_names(deck_content)
+
+        # Convert key card pool into a normalized list for comparison
+        key_card_pool = ["roaring moon ex", "roaring moon", "squawkabilly ex", "pecharunt ex"] #This is for 
+        key_card_pool = [normalize_text(card) for card in key_card_pool]  # Normalize for accurate matching
+
+        # Identify archetype
+        identified_archetype = "Others"
+        for archetype in archetype_response.data:
+            archetype_cards = [normalize_text(card) for card in archetype['key_cards'].split(',')]
+
+            # Check if at least one key card exists in the deck
+            if any(ac in cards for ac in archetype_cards):
+                identified_archetype = archetype['name']
+                break
+            
+        print("Extracted Cards:", cards)
+        print("Key Card Pool:", key_card_pool)
+        print("Archetype Key Cards:", archetype_cards)

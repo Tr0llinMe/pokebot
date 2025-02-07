@@ -12,3 +12,6 @@ OWNER_ID = os.getenv('OWNER_ID')
 
 # Initialize Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+#Discord Channel for Admin Support
+DISCORD_ALERT_CHANNEL = int(os.getenv("DISCORD_ALERT_CHANNEL"))

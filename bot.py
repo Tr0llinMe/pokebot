@@ -1,12 +1,16 @@
 import discord
-from discord.ext import commands
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from config import supabase, OWNER_ID, DISCORD_TOKEN 
-from models import Base, User, Deck, Match, DeckArchetype
 import asyncio
 import os
 import re
+
+from discord.ext import commands
+from discord import Interaction
+
+from supabase import create_client
+
+from config import supabase, OWNER_ID, DISCORD_TOKEN, DISCORD_ALERT_CHANNEL 
+from models import Base, User, Deck, Match, DeckArchetype
+
 from datetime import datetime
 
 # Define intents
@@ -19,12 +23,36 @@ intents.message_content = True
 # Create bot instance with intents
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+#Admin Logs -  Tracking pending deck updates
+pending_archetype_updates = {}  # {message_id: {"user_id": int, "deck_id": int, "deck_name": str, "cards": list}}
+
 @bot.event
 async def on_ready():
     print(f'Bot is ready. Logged in as {bot.user}')
+    
+    
+def extract_card_names(deck_content):
+    """
+    Extract full Pokémon card names while ignoring set codes.
+    """
+    # Match card lines: "1 Roaring Moon ex PRE 162"
+    matches = re.findall(r'\d+\s+([A-Za-z\s-]+?)(?:\s+\w+\s*\d+)?$', deck_content, re.MULTILINE)
+
+    # Normalize to extract only the first word
+    return [normalize_text(match) for match in matches]
+
 
 def normalize_text(text):
-    return text.replace(' ', '').lower()
+    """
+    Normalize card names by:
+    
+    Converting to lowercase
+    Removing set codes (any extra words after the first two)
+    Stripping extra spaces
+    """
+    text = text.lower().strip()  # Convert to lowercase
+    words = text.split()
+    return words[0] if words else ""  # Extract only the first word
 
 ### USER GROUP ###
 @bot.group()
@@ -54,9 +82,9 @@ async def add(ctx):
 
 @add.command(name='deck')
 @commands.dm_only()
-async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
+async def add_deck(ctx, deck_name: str = None):
     discord_id = str(ctx.author.id)
-
+    
     # Check if user is registered
     user_response = supabase.table('users').select("*").eq('discord_id', discord_id).execute()
     if not user_response.data:
@@ -67,38 +95,102 @@ async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
         await ctx.send('Please provide a deck name using the format `!add deck <deck_name>`.')
         return
 
-    # Get archetypes
-    archetype_response = supabase.table('deck_archetypes').select("*").execute()
-    archetype_names = [archetype['name'] for archetype in archetype_response.data]
-
-    if deck_file is None:
-        await ctx.send(f'Please provide a deck text file or choose from the available archetypes: {", ".join(archetype_names)}.')
+    #Checking input by user to see how the data is handled
+    await ctx.send('Would you like to upload a file or paste the decklist? Reply with `file` or `text`.')
+    def check(msg):
+        return msg.author == ctx.author and msg.channel == ctx.channel
+    try:
+        choice_msg = await bot.wait_for("message", check=check, timeout=60.0)
+        choice = choice_msg.content.lower().strip()
+    except asyncio.TimeoutError:
+        await ctx.send("You took too long to respond. Please try again.")
         return
 
-    # Save the deck file
+    deck_content = None
+    
+    # Define `file_path` for early setup
     upload_dir = 'uploads'
     os.makedirs(upload_dir, exist_ok=True)
     sanitized_deck_name = re.sub(r'\W+', '_', deck_name)
     file_path = os.path.join(upload_dir, f"{discord_id}_{sanitized_deck_name}.txt")
-    await deck_file.save(file_path)
+    
+    if choice == "file":
+        await ctx.send("Please upload your deck file.")
 
-    # Read and process the deck file
-    with open(file_path, 'r') as file:
-        deck_content = file.read()
+        try:
+            file_msg = await bot.wait_for("message", check=check, timeout=120.0)
+            if not file_msg.attachments:
+                await ctx.send("No file detected. Please try again.")
+                return
+
+            #Allowing file to be saved
+            deck_file = file_msg.attachments[0]
+            await deck_file.save(file_path)
+
+            # Read and process the deck file
+            with open(file_path, 'r') as file:
+                deck_content = file.read()
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to upload the file. Please try again.")
+            return
+
+    elif choice == "text":
+        await ctx.send("Please paste your decklist (one card per line).")
+
+        try:
+            deck_msg = await bot.wait_for("message", check=check, timeout=180.0)
+            deck_content = deck_msg.content
+            
+            # Save the manually entered decklist to a file
+            with open(file_path, "w") as file:
+                file.write(deck_content)
+                
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to paste the decklist. Please try again.")
+            return
+
+    else:
+        await ctx.send("Invalid option. Please use `file` or `text`.")
+        return
+
+    if not deck_content:
+        await ctx.send("Deck content is empty. Please try again.")
+        return
 
     # Extract card names
-    cards = re.findall(r'\d+ ([\w\s{}]+)', deck_content)
+    cards = re.findall(r'\d+\s+([\w-]+)', deck_content)
     cards = [normalize_text(card) for card in cards]
+    
+    cards = extract_card_names(deck_content)
 
     # Identify archetype
-    identified_archetype = 'Others'
+    identified_archetype = "Others"  # Default to "Others"
+
+    archetype_response = supabase.table('deck_archetypes').select("*").execute()
     for archetype in archetype_response.data:
-        archetype_cards = [normalize_text(card) for card in archetype['key_cards'].split(',')]
-        if all(any(ac in card for card in cards) for ac in archetype_cards):
+        archetype_cards = [normalize_text(card.strip()) for card in archetype['key_cards'].split(',')]
+
+        # Count the number of matching key cards
+        match_count = sum(1 for ac in archetype_cards if ac in cards)
+        
+        # Debug which key cards aren't matching
+        unmatched_cards = [ac for ac in archetype_cards if ac not in cards]
+        print(f"Key Cards Not Found in Deck: {unmatched_cards}")
+
+        # Debugging output
+        print(f"Checking Archetype: {archetype['name']}")
+        print(f"Matching Key Cards Found: {match_count} / 3 Required")
+        
+        
+    
+        # If at least 3 key cards match, assign this archetype
+        if match_count >= 3:
             identified_archetype = archetype['name']
             break
-
-    # Ensure "Others" archetype exists
+        
+        
+        
+    # Ensure "Others" archetype exists - Purely needed just in case error in database tables
     others_archetype = supabase.table('deck_archetypes').select("*").eq('name', 'Others').execute()
     if not others_archetype.data:
         supabase.table('deck_archetypes').insert({"name": "Others", "key_cards": ""}).execute()
@@ -106,13 +198,39 @@ async def add_deck(ctx, deck_name=None, deck_file: discord.Attachment = None):
     # Add the deck to the database
     user_id = user_response.data[0]['id']
     archetype_entry = next((a for a in archetype_response.data if a['name'] == identified_archetype), None)
-    supabase.table('decks').insert({
+    deck_insert_response = supabase.table('decks').insert({
         "user_id": user_id,
         "name": deck_name,
         "archetype_id": archetype_entry['id'] if archetype_entry else None
     }).execute()
 
+    #Deck ID
+    deck_id = deck_insert_response.data[0]['id']
     await ctx.send(f'Deck "{deck_name}" has been added with the identified archetype "{identified_archetype}".')
+     
+    # If deck is classified as "Others", send notification with file
+    if identified_archetype == "Others":
+        channel = bot.get_channel(DISCORD_ALERT_CHANNEL)
+        if channel:
+            # Create a Discord File object from the uploaded decklist
+            deck_file = discord.File(file_path, filename=f"{deck_name}.txt")
+
+            alert_message = await channel.send(
+                f"🚨 **Unrecognized Deck Submission** 🚨\n"
+                f"User: <@{discord_id}>\n"
+                f"Deck Name: **{deck_name}**\n"
+                f"Archetype set to **'Others'**. Click ✅ to categorize.",
+                file=deck_file  # Attach the file
+            )
+            await alert_message.add_reaction("✅")
+
+            # Store pending deck updates for Admins to track
+            pending_archetype_updates[alert_message.id] = {
+                "user_id": discord_id, #store within string id
+                "deck_id": deck_id,
+                "deck_name": deck_name,
+                "cards": cards
+            }
 
 @add.command(name='archetype')
 @commands.dm_only()
@@ -147,16 +265,21 @@ async def add_archetype(ctx):
     key_cards = [card.strip() for card in key_cards]
 
     # Add the archetype to the database using Supabase
-    response = supabase.table('deck_archetypes').insert({
+    try:
+        response = supabase.table('deck_archetypes').insert({
         "name": archetype_name.content,
         "key_cards": ','.join(key_cards)
-    }).execute()
-
-    if response.error:
-        await ctx.send('An error occurred while adding the archetype. Please try again later.')
-        print(f"Error adding archetype: {response.error}")
-    else:
-        await ctx.send(f'Archetype "{archetype_name.content}" has been added with key cards: {", ".join(key_cards)}')
+        }).execute()
+        
+        #Checking if the Insert was Successful
+        if response.error:
+            await ctx.send('An error occurred while adding the archetype. Please try again later.')
+            print(f"Error adding archetype: {response.error}")
+        else:
+            await ctx.send(f'Archetype "{archetype_name.content}" has been added with key cards: {", ".join(key_cards)}')
+    except Exception as e:
+        await ctx.send('❌ An error occurred while adding the archetype. Please try again later.')
+        print(f"Error adding archetype: {e}")
 
 ### MATCH GROUP ###
 @bot.group()
@@ -303,5 +426,84 @@ async def tool(ctx):
         await ctx.send('Please specify a subcommand for user, e.g., "!tool mully".')
         
 #@tool.command(name='mully')
+
+
+## ADMIN: ON CERTAIN EVENTS
+@bot.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return #Do not respond
+    
+    if reaction.message.id in pending_archetype_updates and str(reaction.emoji) == "✅":
+        #Get the pending deck information
+        deck_info = pending_archetype_updates[reaction.message.id]
+        
+        #Ask for new archetype name
+        await reaction.message.channel.send(f"<@{user.id}>, please enter the new archetype name for **{deck_info['deck_name']}**:")
+        
+        def check(msg):
+            return msg.author == user and msg.channel == reaction.message.channel
+        
+        # Wait for response from Admin
+        archetype_msg = await bot.wait_for("message", check=check)
+        new_archetype = archetype_msg.content.strip()
+
+        # ✅ Check if the archetype already exists in the database
+        existing_archetype_response = supabase.table('deck_archetypes').select("id").eq("name", new_archetype).execute()
+
+        if existing_archetype_response.data:
+            # ✅ Archetype exists → Use existing ID
+            new_archetype_id = existing_archetype_response.data[0]['id']
+            await reaction.message.channel.send(f"✅ Archetype **{new_archetype}** already exists. Assigning the deck to this archetype.")
+        else:
+            # ❌ Archetype doesn't exist → Insert a new entry
+            await reaction.message.channel.send(f"🔄 Archetype **{new_archetype}** does not exist. Enter the key cards separated by commas:")
+            key_cards_msg = await bot.wait_for("message", check=check)
+            key_cards = key_cards_msg.content.strip()
+
+            # Insert new archetype into the database
+            archetype_insert_response = supabase.table('deck_archetypes').insert({
+                "name": new_archetype,
+                "key_cards": key_cards
+            }).execute()
+            new_archetype_id = archetype_insert_response.data[0]['id']
+
+        # ✅ Update the deck with the correct archetype ID
+        supabase.table('decks').update({"archetype_id": new_archetype_id}).eq("id", deck_info["deck_id"]).execute()
+
+        # ✅ Fetch username from the database using the discord_id
+        user_discord_id = int(deck_info["user_id"])  # Ensure it's an integer
+        deck_submitter = bot.get_user(user_discord_id)  
+
+        if not deck_submitter:
+            print(f"❌ User {user_discord_id} not found in bot memory. Cannot send DM.")
+        #To send the message from bot to user
+        if deck_submitter:
+            try:
+                await deck_submitter.send(
+                    f"📢 **Deck Update Notification** 📢\n"
+                    f"Your deck **{deck_info['deck_name']}** has been updated to the archetype **{new_archetype}**.\n"
+                    f"If you have any concerns, please contact an admin."
+                )
+                print(f"✅ Successfully sent DM to {deck_submitter.name}.")
+            except discord.Forbidden:
+                print(f"⚠️ Unable to DM {deck_submitter.name}. User may have DMs disabled.")
+
+        # ✅ Log the update in the logs channel
+        LOGS_CHANNEL_ID = DISCORD_ALERT_CHANNEL  # Replace with your logs channel ID
+        logs_channel = bot.get_channel(LOGS_CHANNEL_ID)
+        
+        if logs_channel:
+            await logs_channel.send(
+                f"📝 **Deck Archetype Update Logged** 📝\n"
+                f"User: @{deck_submitter.name}\n"
+                f"Deck Name: **{deck_info['deck_name']}**\n"
+                f"Assigned Archetype: **{new_archetype}**\n"
+                f"Updated by: <@{user.id}>"
+            )
+
+        # ✅ Remove pending entry
+        del pending_archetype_updates[reaction.message.id]
+
 
 bot.run(DISCORD_TOKEN)
