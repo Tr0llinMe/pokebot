@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Date
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Date, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -6,11 +6,14 @@ from config import supabase
 
 Base = declarative_base()
 
+#This is only needed is SQL ALCHEMY is used for future reference.
+
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
     discord_id = Column(String(255), unique=True, nullable=False)  # Specify length for VARCHAR
     username = Column(String(255), nullable=False)  # Specify length for VARCHAR
+    is_admin = Column(Boolean, nullable=False, default=False)  # New admin column
 
 class Deck(Base):
     __tablename__ = 'decks'
