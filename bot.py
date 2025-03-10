@@ -74,7 +74,7 @@ async def register(ctx):
         supabase.table('users').insert({"discord_id": discord_id, "username": username}).execute()
         await ctx.send('You have been registered.')
 
-### DECK GROUP ###
+### ADD GROUP ###
 @bot.group()
 async def add(ctx):
     if ctx.invoked_subcommand is None:
