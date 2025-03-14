@@ -2,6 +2,7 @@ import discord
 import asyncio
 import os
 import re
+import json
 
 from discord.ext import commands
 from discord import Interaction
@@ -9,9 +10,9 @@ from discord import Interaction
 from supabase import create_client
 
 from config import supabase, OWNER_ID, DISCORD_TOKEN, DISCORD_ALERT_CHANNEL 
-from models import Base, User, Deck, Match, DeckArchetype
+#from models import Base, User, Deck, Match, DeckArchetype
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Define intents
 intents = discord.Intents.default()
@@ -54,6 +55,70 @@ def normalize_text(text):
     words = text.split()
     return words[0] if words else ""  # Extract only the first word
 
+### SINGLE COMMANDS ###
+
+## This is to view the decks based on the user ##
+@bot.command()
+async def mydecks(ctx):
+    discord_id = str(ctx.author.id)  # ✅ Ensure it's a string
+
+    # ✅ Step 1: Get the internal `user_id` from the users table
+    user_response = supabase.table('users').select("id").eq("discord_id", discord_id).execute()
+
+    if not user_response.data:
+        await ctx.send("❌ You are not registered in the system. Please add a deck first.")
+        return
+
+    user_id = user_response.data[0]["id"]  # ✅ Fetch internal user ID
+
+    # ✅ Step 2: Fetch all decks for this `user_id`
+    user_decks = supabase.table('decks').select("id, name, decklist").eq("user_id", user_id).execute()
+
+    # ✅ Debugging: Print response to verify data
+    print(f"Debug: Retrieved Decks for User ID {user_id}: {user_decks.data}")
+
+    if not user_decks.data:
+        await ctx.send("You don't have any saved decks yet.")
+        return
+
+    # ✅ Format response message
+    response = "**Your Saved Decks:**\n"
+    for deck in user_decks.data:
+        deck_data = json.loads(deck["decklist"])  # Convert JSON string back to Python dict
+        response += f"- **{deck_data['name']}** - {deck_data['archetype']} (ID: {deck['id']})\n"
+
+    response += "\nType `!viewdeck <ID>` to see a specific decklist."
+
+    await ctx.send(response)
+## This is to view the decklist given the deck and ID ##
+@bot.command()
+async def viewdeck(ctx, deck_id: int):
+    discord_id = str(ctx.author.id)  # Ensure correct format
+
+    # ✅ Step 1: Get `user_id` from `users` table
+    user_response = supabase.table('users').select("id").eq("discord_id", discord_id).execute()
+    if not user_response.data:
+        await ctx.send("❌ You are not registered in the system. Please add a deck first.")
+        return
+
+    user_id = user_response.data[0]["id"]  # ✅ Fetch internal user ID
+
+    # ✅ Step 2: Fetch the requested deck using `user_id`
+    deck_response = supabase.table('decks').select("decklist").eq("user_id", user_id).eq("id", deck_id).execute()
+
+    if not deck_response.data:
+        await ctx.send("❌ Deck not found.")
+        return
+
+    deck_data = json.loads(deck_response.data[0]['decklist'])  # Convert JSON back to Python dict
+
+    # ✅ Format decklist output
+    response = f"📜 **{deck_data['name']}** - {deck_data['archetype']} 📜\n"
+    response += f"🕒 Last Modified: {deck_data['last_modified']}\n"
+    response += "```" + "\n".join(deck_data["cards"]) + "```"
+
+    await ctx.send(response)
+
 ### USER GROUP ###
 @bot.group()
 async def user(ctx):
@@ -74,15 +139,15 @@ async def register(ctx):
         supabase.table('users').insert({"discord_id": discord_id, "username": username}).execute()
         await ctx.send('You have been registered.')
 
-### ADD GROUP ###
+### DECK GROUP ###
 @bot.group()
-async def add(ctx):
+async def deck(ctx):
     if ctx.invoked_subcommand is None:
-        await ctx.send('Please specify a subcommand for user, e.g., "!add deck".')
+        await ctx.send('Please specify a subcommand for user, e.g., "!deck add".')
 
-@add.command(name='deck')
+@deck.command(name='add')
 @commands.dm_only()
-async def add_deck(ctx, deck_name: str = None):
+async def deck_add(ctx, deck_name: str = None):
     discord_id = str(ctx.author.id)
     
     # Check if user is registered
@@ -195,14 +260,25 @@ async def add_deck(ctx, deck_name: str = None):
     if not others_archetype.data:
         supabase.table('deck_archetypes').insert({"name": "Others", "key_cards": ""}).execute()
 
-    # Add the deck to the database
+    # ✅ Convert decklist into JSON format
+    deck_data = {
+        "name": deck_name,
+        "archetype": identified_archetype,
+        "cards": deck_content.split("\n"),  # Store decklist as a list
+        "last_modified": datetime.now(timezone.utc).isoformat()  # Store timestamp for future updates
+    }
+
+    # ✅ Insert deck into the database
     user_id = user_response.data[0]['id']
     archetype_entry = next((a for a in archetype_response.data if a['name'] == identified_archetype), None)
+
     deck_insert_response = supabase.table('decks').insert({
         "user_id": user_id,
         "name": deck_name,
-        "archetype_id": archetype_entry['id'] if archetype_entry else None
+        "archetype_id": archetype_entry['id'] if archetype_entry else None,
+        "decklist": json.dumps(deck_data)  # ✅ Supabase supports JSONB storage with JSON dumps
     }).execute()
+    
 
     #Deck ID
     deck_id = deck_insert_response.data[0]['id']
@@ -232,9 +308,16 @@ async def add_deck(ctx, deck_name: str = None):
                 "cards": cards
             }
 
-@add.command(name='archetype')
+### ARCHETYPE GROUP ###
+@bot.group()
+async def archetype(ctx):
+    if ctx.invoked_subcommand is None:
+        await ctx.send('Please specify a subcommand for user, e.g., "!archetype add".')
+
+
+@archetype.command(name='add')
 @commands.dm_only()
-async def add_archetype(ctx):
+async def archetype_add(ctx):
     if str(ctx.author.id) != OWNER_ID:
         await ctx.send('You are not authorized to add archetypes.')
         return
