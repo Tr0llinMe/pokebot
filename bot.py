@@ -327,6 +327,7 @@ async def deck_edit(ctx):
         await ctx.send("You don't have any saved decks yet.")
         return
 
+    # ✅ Step 3: List decks for user selection
     response = "**Your Saved Decks:**\n"
     for deck in user_decks.data:
         deck_data = json.loads(deck["decklist"])
