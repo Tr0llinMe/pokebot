@@ -308,6 +308,128 @@ async def deck_add(ctx, deck_name: str = None):
                 "cards": cards
             }
 
+@deck.command(name='edit')
+@commands.dm_omly()
+async def deck_edit(ctx):
+    discord_id = str(ctx.author.id) #Fetch User ID
+    
+    # ✅ Step 1: Matching user ID based on disc ID
+    user_response = supabase.table('users').select("id").eq("discord_id", discord_id).execute()
+    if not user_response.data:
+        await ctx.send("❌ You are not registered in the system. Please add a deck first.")
+        return
+
+    user_id = user_response.data[0]["id"] #Grab the ID of the user
+    
+    # ✅ Step 2: Fetch all decks for this user
+    user_decks = supabase.table('decks').select("id, name, decklist").eq("user_id", user_id).execute()
+    if not user_decks.data:
+        await ctx.send("You don't have any saved decks yet.")
+        return
+
+    response = "**Your Saved Decks:**\n"
+    for deck in user_decks.data:
+        deck_data = json.loads(deck["decklist"])
+        response += f"- **{deck_data['name']}** - {deck_data['archetype']} (ID: {deck['id']})\n"
+
+    response += "\nPlease enter the `ID` of the deck you want to edit:"
+    await ctx.send(response)
+
+    def check(msg):
+        return msg.author == ctx.author and msg.channel == ctx.channel
+
+    try:
+        deck_id_msg = await bot.wait_for("message", check=check, timeout=60.0)
+        deck_id = int(deck_id_msg.content.strip())
+    except (asyncio.TimeoutError, ValueError):
+        await ctx.send("❌ Invalid input. Please try again.")
+        return
+
+    # ✅ Step 4: Fetch selected deck
+    deck_response = supabase.table('decks').select("id, name, decklist").eq("user_id", user_id).eq("id", deck_id).execute()
+    if not deck_response.data:
+        await ctx.send("❌ Deck not found or you do not have permission to edit this deck.")
+        return
+
+    deck = deck_response.data[0]
+    deck_data = json.loads(deck["decklist"])  # Convert JSON string to dict
+    
+    # ✅ Step 5: Ask if they want to upload a file or paste the decklist
+    await ctx.send("📜 Would you like to upload a new deck file or paste the decklist? Reply with `file` or `text`.")
+
+    try:
+        choice_msg = await bot.wait_for("message", check=check, timeout=60.0)
+        choice = choice_msg.content.lower().strip()
+    except asyncio.TimeoutError:
+        await ctx.send("❌ You took too long to respond.")
+        return
+
+    deck_content = None
+
+    if choice == "file":
+        await ctx.send("📁 Please upload your new deck file.")
+
+        try:
+            file_msg = await bot.wait_for("message", check=check, timeout=120.0)
+            if not file_msg.attachments:
+                await ctx.send("❌ No file detected. Please try again.")
+                return
+
+            deck_file = file_msg.attachments[0]
+            deck_content = await deck_file.read()  # Read file contents as string
+            deck_content = deck_content.decode("utf-8")  # Convert bytes to string
+        except asyncio.TimeoutError:
+            await ctx.send("❌ You took too long to upload the file. Please try again.")
+            return
+
+    elif choice == "text":
+        await ctx.send("📜 Please paste your new decklist (one card per line).")
+
+        try:
+            deck_msg = await bot.wait_for("message", check=check, timeout=180.0)
+            deck_content = deck_msg.content.strip()
+        except asyncio.TimeoutError:
+            await ctx.send("❌ You took too long to paste the decklist. Please try again.")
+            return
+    else:
+        await ctx.send("❌ Invalid option. Please try again.")
+        return
+
+    # ✅ Step 6: Ask if they want to change the deck name
+    await ctx.send("✏️ Would you like to rename the deck? Reply with `y` or `n`.")
+
+    try:
+        rename_msg = await bot.wait_for("message", check=check, timeout=30.0)
+        rename_choice = rename_msg.content.lower().strip()
+    except asyncio.TimeoutError:
+        await ctx.send("❌ You took too long to respond. Keeping the original name.")
+        rename_choice = "n"
+
+    if rename_choice == "y":
+        await ctx.send("✏️ Enter the new deck name:")
+        try:
+            name_msg = await bot.wait_for("message", check=check, timeout=60.0)
+            new_name = name_msg.content.strip()
+        except asyncio.TimeoutError:
+            await ctx.send("❌ You took too long to respond. Keeping the original name.")
+            new_name = deck_data["name"]
+    else:
+        new_name = deck_data["name"]
+
+    # ✅ Step 7: Update deck in database
+    deck_data["name"] = new_name
+    deck_data["cards"] = deck_content.split("\n")  # Convert new decklist to list
+    deck_data["last_modified"] = datetime.now(timezone.utc).isoformat()  # Update timestamp
+
+    update_fields = {
+        "name": new_name,
+        "decklist": json.dumps(deck_data)  # Store updated JSON
+    }
+
+    supabase.table('decks').update(update_fields).eq("id", deck_id).execute()
+
+    await ctx.send(f"✅ Your deck **{deck_data['name']}** has been updated successfully!")
+
 ### ARCHETYPE GROUP ###
 @bot.group()
 async def archetype(ctx):
