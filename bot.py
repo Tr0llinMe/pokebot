@@ -494,84 +494,200 @@ async def match(ctx):
         await ctx.send('Please specify a subcommand for user, e.g., "!match log".')
 
 @match.command(name='log')
-async def log_match(ctx, deck_name, result):
+async def log_match(ctx):
     discord_id = str(ctx.author.id)
-
-    # Check if the user is registered
+    
+    # Check if user is registered
     user_response = supabase.table('users').select("*").eq('discord_id', discord_id).execute()
     if not user_response.data:
         await ctx.send('You need to register first.')
         return
 
-    user = user_response.data[0]  # Get the user object
-
-    # Check if the deck exists for the user
-    deck_response = supabase.table('decks').select("*").eq('user_id', user['id']).eq('name', deck_name).execute()
-    if not deck_response.data:
-        await ctx.send('Deck not found.')
+    user = user_response.data[0]
+    
+    # Get user's decks
+    decks_response = supabase.table('decks').select("id, name").eq('user_id', user['id']).execute()
+    if not decks_response.data:
+        await ctx.send('You need to add a deck first.')
         return
 
-    deck = deck_response.data[0]  # Get the deck object
-
-    # Standardize the result input
-    win_conditions = ['won', 'win', '1']
-    loss_conditions = ['lost', 'lose', '2']
-    if result.lower() in win_conditions:
-        standardized_result = 'Win'
-    elif result.lower() in loss_conditions:
-        standardized_result = 'Loss'
-    else:
-        await ctx.send('Invalid result. Please enter "won", "win", "lost", "lose", "1", or "2".')
-        return
-
-    # Retrieve archetypes from the database
-    archetypes_response = supabase.table('deck_archetypes').select("*").execute()
-    archetypes = archetypes_response.data
-    archetype_names = [archetype['name'] for archetype in archetypes if archetype['name'] != 'Others']
-    archetype_names.append('Others')  # Ensure "Others" is the last option
-
-    # Prompt the user to select an opponent archetype
-    await ctx.send(f'Please select the opponent archetype:\n' +
-                   '\n'.join(f'{i + 1}. {name}' for i, name in enumerate(archetype_names)))
-
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel
-
+    # Create an embed with deck selection buttons
+    embed = discord.Embed(
+        title="Select Your Deck",
+        description="Click the reaction corresponding to your deck:",
+        color=discord.Color.blue()
+    )
+    
+    # Add deck options to embed
+    for i, deck in enumerate(decks_response.data):
+        embed.add_field(name=f"{i+1}. {deck['name']}", value="\u200b", inline=False)
+    
+    message = await ctx.send(embed=embed)
+    
+    # Add number reactions
+    for i in range(len(decks_response.data)):
+        await message.add_reaction(f"{i+1}\u20e3")  # Number emojis
+    
+    # Wait for reaction
+    def check(reaction, user):
+        return user == ctx.author and reaction.message.id == message.id and reaction.emoji in [f"{i+1}\u20e3" for i in range(len(decks_response.data))]
+    
     try:
-        msg = await bot.wait_for('message', check=check, timeout=60.0)
-        selected_index = int(msg.content) - 1
-        if 0 <= selected_index < len(archetype_names):
-            opponent_archetype = archetype_names[selected_index]
-        else:
-            await ctx.send('Invalid selection. Please try logging the match again.')
-            return
-    except ValueError:
-        await ctx.send('Invalid input. Please enter the number corresponding to the archetype.')
-        return
-    except asyncio.TimeoutError:
-        await ctx.send('You took too long to respond. Please try logging the match again.')
-        return
-
-    # Get the current date
-    current_date = datetime.now().strftime('%Y-%m-%d')
-
-    # Log the match in the database
-    match_response = supabase.table('matches').insert({
-        "deck_id": deck['id'],
-        "result": standardized_result,
-        "opponent_archetype": opponent_archetype,
-        "player": user['username'],
-        "date": current_date
-    }).execute()
-
-    if match_response.error:
-        await ctx.send('An error occurred while logging the match. Please try again later.')
-        print(f"Error logging match: {match_response.error}")
-    else:
-        await ctx.send(f'Match for deck "{deck_name}" with result "{standardized_result}" against archetype "{opponent_archetype}" logged on {current_date}.')
-        print(f'Match for deck "{deck_name}" with result "{standardized_result}" against archetype "{opponent_archetype}" logged for user {user["username"]} on {current_date}.')
+        reaction, user = await bot.wait_for('reaction_add', timeout=60.0, check=check)
+        deck_index = int(reaction.emoji[0]) - 1
+        selected_deck = decks_response.data[deck_index]
         
+        # Ask for match result
+        result_embed = discord.Embed(
+            title="Match Result",
+            description="React with ✅ for Win or ❌ for Loss",
+            color=discord.Color.blue()
+        )
+        result_message = await ctx.send(embed=result_embed)
+        await result_message.add_reaction("✅")
+        await result_message.add_reaction("❌")
+        
+        def result_check(reaction, user):
+            return user == ctx.author and reaction.message.id == result_message.id and reaction.emoji in ["✅", "❌"]
+        
+        result_reaction, _ = await bot.wait_for('reaction_add', timeout=60.0, check=result_check)
+        result = "Win" if result_reaction.emoji == "✅" else "Loss"
+        
+        # Get archetypes
+        archetypes_response = supabase.table('deck_archetypes').select("*").execute()
+        archetypes = archetypes_response.data
+        
+        # Create archetype selection embed
+        archetype_embed = discord.Embed(
+            title="Opponent's Archetype",
+            description="Select the opponent's archetype:",
+            color=discord.Color.blue()
+        )
+        
+        # Add archetype options
+        for i, archetype in enumerate(archetypes):
+            archetype_embed.add_field(name=f"{i+1}. {archetype['name']}", value="\u200b", inline=False)
+        archetype_embed.add_field(name=f"{len(archetypes)+1}. Others", value="\u200b", inline=False)
+        
+        archetype_message = await ctx.send(embed=archetype_embed)
+        
+        # Add number reactions for archetypes
+        for i in range(len(archetypes) + 1):  # +1 for Others option
+            await archetype_message.add_reaction(f"{i+1}\u20e3")
+        
+        def archetype_check(reaction, user):
+            return user == ctx.author and reaction.message.id == archetype_message.id and reaction.emoji in [f"{i+1}\u20e3" for i in range(len(archetypes) + 1)]
+        
+        archetype_reaction, _ = await bot.wait_for('reaction_add', timeout=60.0, check=archetype_check)
+        archetype_index = int(archetype_reaction.emoji[0]) - 1
+        
+        # Handle Others selection
+        if archetype_index == len(archetypes):
+            # Prompt for new archetype name
+            new_archetype_embed = discord.Embed(
+                title="New Archetype",
+                description="Please enter the name of the new archetype:",
+                color=discord.Color.blue()
+            )
+            await ctx.send(embed=new_archetype_embed)
+            
+            def new_archetype_check(m):
+                return m.author == ctx.author and m.channel == ctx.channel
+            
+            try:
+                new_archetype_msg = await bot.wait_for('message', timeout=60.0, check=new_archetype_check)
+                new_archetype_name = new_archetype_msg.content.strip()
+                opponent_archetype = "Others"  # Temporarily set to Others
                 
+                # Store the new archetype request
+                pending_archetype_updates[new_archetype_msg.id] = {
+                    "user_id": discord_id,
+                    "deck_id": selected_deck['id'],
+                    "deck_name": selected_deck['name'],
+                    "new_archetype": new_archetype_name,
+                    "match_result": result
+                }
+                
+            except asyncio.TimeoutError:
+                await ctx.send("You took too long to respond. Please try logging the match again.")
+                return
+        else:
+            opponent_archetype = archetypes[archetype_index]['name']
+        
+        # Ask for optional notes
+        notes_embed = discord.Embed(
+            title="Match Notes (Optional)",
+            description="Type any notes about the match or press ❌ to skip",
+            color=discord.Color.blue()
+        )
+        notes_message = await ctx.send(embed=notes_embed)
+        await notes_message.add_reaction("❌")
+        
+        def notes_check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+        
+        try:
+            notes_msg = await bot.wait_for('message', timeout=60.0, check=notes_check)
+            notes = notes_msg.content
+        except asyncio.TimeoutError:
+            notes = None
+        
+        # Log the match
+        current_date = datetime.now().strftime('%Y-%m-%d')
+        match_data = {
+            "deck_id": selected_deck['id'],
+            "result": result,
+            "opponent_archetype": opponent_archetype,
+            "player": user['username'],
+            "date": current_date,
+            "notes": notes
+        }
+        
+        match_response = supabase.table('matches').insert(match_data).execute()
+        
+        if match_response.error:
+            await ctx.send('An error occurred while logging the match. Please try again later.')
+            print(f"Error logging match: {match_response.error}")
+        else:
+            success_embed = discord.Embed(
+                title="Match Logged Successfully!",
+                description=f"Deck: {selected_deck['name']}\nResult: {result}\nOpponent: {opponent_archetype}\nDate: {current_date}",
+                color=discord.Color.green()
+            )
+            if notes:
+                success_embed.add_field(name="Notes", value=notes, inline=False)
+            await ctx.send(embed=success_embed)
+            
+            # If new archetype was requested, send notification to admin channel
+            if opponent_archetype == "Others":
+                channel = bot.get_channel(DISCORD_ALERT_CHANNEL)
+                if channel:
+                    # Get user's name from Discord
+                    user_obj = bot.get_user(int(discord_id))
+                    username = user_obj.name if user_obj else "Unknown User"
+                    
+                    alert_embed = discord.Embed(
+                        title="New Archetype Request",
+                        description=f"User: **{username}** (<@{discord_id}>)\nRequested archetype: **{new_archetype_name}**",
+                        color=discord.Color.orange()
+                    )
+                    alert_embed.add_field(name="Deck", value=selected_deck['name'], inline=True)
+                    alert_embed.add_field(name="Match Result", value=result, inline=True)
+                    alert_message = await channel.send(embed=alert_embed)
+                    await alert_message.add_reaction("✅")
+                    
+                    # Store the alert message ID for later reference
+                    pending_archetype_updates[alert_message.id] = {
+                        "user_id": discord_id,
+                        "deck_id": selected_deck['id'],
+                        "deck_name": selected_deck['name'],
+                        "new_archetype": new_archetype_name,
+                        "match_id": match_response.data[0]['id']  # Store the match ID for updating
+                    }
+            
+    except asyncio.TimeoutError:
+        await ctx.send("You took too long to respond. Please try logging the match again.")
+
 @match.command(name='history')
 @commands.guild_only()
 async def matchup_history(ctx, archetype):
@@ -641,75 +757,86 @@ async def on_reaction_add(reaction, user):
         return #Do not respond
     
     if reaction.message.id in pending_archetype_updates and str(reaction.emoji) == "✅":
-        #Get the pending deck information
-        deck_info = pending_archetype_updates[reaction.message.id]
+        # Get the pending archetype information
+        archetype_info = pending_archetype_updates[reaction.message.id]
         
-        #Ask for new archetype name
-        await reaction.message.channel.send(f"<@{user.id}>, please enter the new archetype name for **{deck_info['deck_name']}**:")
+        # Ask admin to either create new archetype or select existing one
+        admin_embed = discord.Embed(
+            title="Archetype Request Response",
+            description=f"User requested archetype: **{archetype_info['new_archetype']}**\n\n"
+                       f"1️⃣ Create new archetype\n"
+                       f"2️⃣ Map to existing archetype",
+            color=discord.Color.blue()
+        )
+        admin_message = await reaction.message.channel.send(embed=admin_embed)
+        await admin_message.add_reaction("1️⃣")
+        await admin_message.add_reaction("2️⃣")
         
-        def check(msg):
-            return msg.author == user and msg.channel == reaction.message.channel
+        def admin_check(reaction, user):
+            return user == reaction.message.author and reaction.message.id == admin_message.id and str(reaction.emoji) in ["1️⃣", "2️⃣"]
         
-        # Wait for response from Admin
-        archetype_msg = await bot.wait_for("message", check=check)
-        new_archetype = archetype_msg.content.strip()
-
-        # ✅ Check if the archetype already exists in the database
-        existing_archetype_response = supabase.table('deck_archetypes').select("id").eq("name", new_archetype).execute()
-
-        if existing_archetype_response.data:
-            # ✅ Archetype exists → Use existing ID
-            new_archetype_id = existing_archetype_response.data[0]['id']
-            await reaction.message.channel.send(f"✅ Archetype **{new_archetype}** already exists. Assigning the deck to this archetype.")
-        else:
-            # ❌ Archetype doesn't exist → Insert a new entry
-            await reaction.message.channel.send(f"🔄 Archetype **{new_archetype}** does not exist. Enter the key cards separated by commas:")
-            key_cards_msg = await bot.wait_for("message", check=check)
-            key_cards = key_cards_msg.content.strip()
-
-            # Insert new archetype into the database
-            archetype_insert_response = supabase.table('deck_archetypes').insert({
-                "name": new_archetype,
-                "key_cards": key_cards
-            }).execute()
-            new_archetype_id = archetype_insert_response.data[0]['id']
-
-        # ✅ Update the deck with the correct archetype ID
-        supabase.table('decks').update({"archetype_id": new_archetype_id}).eq("id", deck_info["deck_id"]).execute()
-
-        # ✅ Fetch username from the database using the discord_id
-        user_discord_id = int(deck_info["user_id"])  # Ensure it's an integer
-        deck_submitter = bot.get_user(user_discord_id)  
-
-        if not deck_submitter:
-            print(f"❌ User {user_discord_id} not found in bot memory. Cannot send DM.")
-        #To send the message from bot to user
-        if deck_submitter:
-            try:
-                await deck_submitter.send(
-                    f"📢 **Deck Update Notification** 📢\n"
-                    f"Your deck **{deck_info['deck_name']}** has been updated to the archetype **{new_archetype}**.\n"
-                    f"If you have any concerns, please contact an admin."
+        try:
+            admin_reaction, _ = await bot.wait_for('reaction_add', timeout=60.0, check=admin_check)
+            
+            if str(admin_reaction.emoji) == "1️⃣":
+                # Create new archetype
+                await reaction.message.channel.send("Please enter the key cards for this archetype, separated by commas:")
+                
+                def key_cards_check(m):
+                    return m.author == user and m.channel == reaction.message.channel
+                
+                key_cards_msg = await bot.wait_for('message', timeout=60.0, check=key_cards_check)
+                key_cards = key_cards_msg.content.strip()
+                
+                # Insert new archetype
+                archetype_response = supabase.table('deck_archetypes').insert({
+                    "name": archetype_info['new_archetype'],
+                    "key_cards": key_cards
+                }).execute()
+                
+                new_archetype_id = archetype_response.data[0]['id']
+                
+            else:
+                # Map to existing archetype
+                archetypes_response = supabase.table('deck_archetypes').select("*").execute()
+                archetypes = archetypes_response.data
+                
+                archetype_embed = discord.Embed(
+                    title="Select Existing Archetype",
+                    description="React with the number corresponding to the archetype:",
+                    color=discord.Color.blue()
                 )
-                print(f"✅ Successfully sent DM to {deck_submitter.name}.")
-            except discord.Forbidden:
-                print(f"⚠️ Unable to DM {deck_submitter.name}. User may have DMs disabled.")
-
-        # ✅ Log the update in the logs channel
-        LOGS_CHANNEL_ID = DISCORD_ALERT_CHANNEL  # Replace with your logs channel ID
-        logs_channel = bot.get_channel(LOGS_CHANNEL_ID)
-        
-        if logs_channel:
-            await logs_channel.send(
-                f"📝 **Deck Archetype Update Logged** 📝\n"
-                f"User: @{deck_submitter.name}\n"
-                f"Deck Name: **{deck_info['deck_name']}**\n"
-                f"Assigned Archetype: **{new_archetype}**\n"
-                f"Updated by: <@{user.id}>"
-            )
-
-        # ✅ Remove pending entry
-        del pending_archetype_updates[reaction.message.id]
-
+                
+                for i, archetype in enumerate(archetypes):
+                    archetype_embed.add_field(name=f"{i+1}. {archetype['name']}", value="\u200b", inline=False)
+                
+                archetype_message = await reaction.message.channel.send(embed=archetype_embed)
+                
+                for i in range(len(archetypes)):
+                    await archetype_message.add_reaction(f"{i+1}\u20e3")
+                
+                def archetype_check(reaction, user):
+                    return user == reaction.message.author and reaction.message.id == archetype_message.id and reaction.emoji in [f"{i+1}\u20e3" for i in range(len(archetypes))]
+                
+                archetype_reaction, _ = await bot.wait_for('reaction_add', timeout=60.0, check=archetype_check)
+                archetype_index = int(archetype_reaction.emoji[0]) - 1
+                new_archetype_id = archetypes[archetype_index]['id']
+            
+            # Update the match with the new archetype
+            supabase.table('matches').update({
+                "opponent_archetype": archetype_info['new_archetype']
+            }).eq("id", archetype_info['match_id']).execute()
+            
+            # Notify the user
+            user_discord_id = int(archetype_info['user_id'])
+            user = bot.get_user(user_discord_id)
+            if user:
+                await user.send(f"Your match against archetype **{archetype_info['new_archetype']}** has been updated!")
+            
+            # Clean up
+            del pending_archetype_updates[reaction.message.id]
+            
+        except asyncio.TimeoutError:
+            await reaction.message.channel.send("You took too long to respond. Please try again later.")
 
 bot.run(DISCORD_TOKEN)
