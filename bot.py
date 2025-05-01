@@ -309,7 +309,7 @@ async def deck_add(ctx, deck_name: str = None):
             }
 
 @deck.command(name='edit')
-@commands.dm_omly()
+@commands.dm_only()
 async def deck_edit(ctx):
     discord_id = str(ctx.author.id) #Fetch User ID
     
@@ -540,97 +540,102 @@ async def log_match(ctx):
         # Ask for match result
         result_embed = discord.Embed(
             title="Match Result",
-            description="React with ✅ for Win or ❌ for Loss",
+            description="React with ✅ for Win, ❌ for Loss, or ➖ for Tie",
             color=discord.Color.blue()
         )
         result_message = await ctx.send(embed=result_embed)
         await result_message.add_reaction("✅")
         await result_message.add_reaction("❌")
+        await result_message.add_reaction("➖")  # Tie
         
         def result_check(reaction, user):
-            return user == ctx.author and reaction.message.id == result_message.id and reaction.emoji in ["✅", "❌"]
+            return user == ctx.author and reaction.message.id == result_message.id and reaction.emoji in ["✅", "❌", "➖"]
         
         result_reaction, _ = await bot.wait_for('reaction_add', timeout=60.0, check=result_check)
-        result = "Win" if result_reaction.emoji == "✅" else "Loss"
+        if result_reaction.emoji == "✅":
+            result = "Win"
+        elif result_reaction.emoji == "❌":
+            result = "Loss"
+        else:
+            result = "Tie"
         
         # Get archetypes
         archetypes_response = supabase.table('deck_archetypes').select("*").execute()
         archetypes = archetypes_response.data
+        main_archetypes = [a for a in archetypes if a['name'] != 'Others']
+        others_archetype = next((a for a in archetypes if a['name'] == 'Others'), None)
+        if others_archetype:
+            main_archetypes.append(others_archetype)
         
-        # Create archetype selection embed
         archetype_embed = discord.Embed(
             title="Opponent's Archetype",
-            description="Select the opponent's archetype:",
+            description="Select the opponent's archetype (react or type the number):",
             color=discord.Color.blue()
         )
-        
-        # Add archetype options
-        for i, archetype in enumerate(archetypes):
+        for i, archetype in enumerate(main_archetypes):
             archetype_embed.add_field(name=f"{i+1}. {archetype['name']}", value="\u200b", inline=False)
-        archetype_embed.add_field(name=f"{len(archetypes)+1}. Others", value="\u200b", inline=False)
-        
         archetype_message = await ctx.send(embed=archetype_embed)
-        
-        # Add number reactions for archetypes
-        for i in range(len(archetypes) + 1):  # +1 for Others option
+        for i in range(len(main_archetypes)):
             await archetype_message.add_reaction(f"{i+1}\u20e3")
         
         def archetype_check(reaction, user):
-            return user == ctx.author and reaction.message.id == archetype_message.id and reaction.emoji in [f"{i+1}\u20e3" for i in range(len(archetypes) + 1)]
+            return user == ctx.author and reaction.message.id == archetype_message.id and reaction.emoji in [f"{i+1}\u20e3" for i in range(len(main_archetypes))]
         
-        archetype_reaction, _ = await bot.wait_for('reaction_add', timeout=60.0, check=archetype_check)
-        archetype_index = int(archetype_reaction.emoji[0]) - 1
-        
-        # Handle Others selection
-        if archetype_index == len(archetypes):
-            # Prompt for new archetype name
-            new_archetype_embed = discord.Embed(
-                title="New Archetype",
-                description="Please enter the name of the new archetype:",
-                color=discord.Color.blue()
-            )
-            await ctx.send(embed=new_archetype_embed)
-            
-            def new_archetype_check(m):
-                return m.author == ctx.author and m.channel == ctx.channel
-            
-            try:
-                new_archetype_msg = await bot.wait_for('message', timeout=60.0, check=new_archetype_check)
-                new_archetype_name = new_archetype_msg.content.strip()
-                opponent_archetype = "Others"  # Temporarily set to Others
-                
-                # Store the new archetype request
-                pending_archetype_updates[new_archetype_msg.id] = {
-                    "user_id": discord_id,
-                    "deck_id": selected_deck['id'],
-                    "deck_name": selected_deck['name'],
-                    "new_archetype": new_archetype_name,
-                    "match_result": result
-                }
-                
-            except asyncio.TimeoutError:
-                await ctx.send("You took too long to respond. Please try logging the match again.")
+        archetype_index = None
+        try:
+            done, pending = await asyncio.wait([
+                bot.wait_for('reaction_add', timeout=60.0, check=archetype_check),
+                bot.wait_for('message', timeout=60.0, check=lambda m: m.author == ctx.author and m.channel == ctx.channel)
+            ], return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                result = task.result()
+                if isinstance(result, tuple):  # reaction
+                    archetype_index = int(result[0].emoji[0]) - 1
+                else:  # message
+                    try:
+                        archetype_index = int(result.content.strip()) - 1
+                    except Exception:
+                        archetype_index = None
+            if archetype_index is None or archetype_index < 0 or archetype_index >= len(main_archetypes):
+                await ctx.send("Invalid archetype selection.")
                 return
-        else:
-            opponent_archetype = archetypes[archetype_index]['name']
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to respond. Please try logging the match again.")
+            return
+        # Now use main_archetypes[archetype_index]['name']
+        opponent_archetype = main_archetypes[archetype_index]['name']
         
         # Ask for optional notes
         notes_embed = discord.Embed(
             title="Match Notes (Optional)",
-            description="Type any notes about the match or press ❌ to skip",
+            description="Type any notes about the match or react with ❌ to skip",
             color=discord.Color.blue()
         )
         notes_message = await ctx.send(embed=notes_embed)
         await notes_message.add_reaction("❌")
         
+        notes = None
         def notes_check(m):
             return m.author == ctx.author and m.channel == ctx.channel
         
-        try:
-            notes_msg = await bot.wait_for('message', timeout=60.0, check=notes_check)
-            notes = notes_msg.content
-        except asyncio.TimeoutError:
-            notes = None
+        done = False
+        while not done:
+            try:
+                done, pending = await asyncio.wait([
+                    bot.wait_for('message', timeout=60.0, check=notes_check),
+                    bot.wait_for('reaction_add', timeout=60.0, check=lambda r, u: u == ctx.author and r.message.id == notes_message.id and str(r.emoji) == "❌")
+                ], return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    result = task.result()
+                    if isinstance(result, tuple):  # reaction
+                        notes = None
+                        done = True
+                    else:  # message
+                        notes = result.content
+                        done = True
+            except asyncio.TimeoutError:
+                notes = None
+                done = True
         
         # Log the match
         current_date = datetime.now().strftime('%Y-%m-%d')
@@ -638,17 +643,14 @@ async def log_match(ctx):
             "deck_id": selected_deck['id'],
             "result": result,
             "opponent_archetype": opponent_archetype,
-            "player": user['username'],
+            "player": ctx.author.name,
             "date": current_date,
             "notes": notes
         }
         
-        match_response = supabase.table('matches').insert(match_data).execute()
-        
-        if match_response.error:
-            await ctx.send('An error occurred while logging the match. Please try again later.')
-            print(f"Error logging match: {match_response.error}")
-        else:
+        try:
+            match_response = supabase.table('matches').insert(match_data).execute()
+            
             success_embed = discord.Embed(
                 title="Match Logged Successfully!",
                 description=f"Deck: {selected_deck['name']}\nResult: {result}\nOpponent: {opponent_archetype}\nDate: {current_date}",
@@ -668,7 +670,7 @@ async def log_match(ctx):
                     
                     alert_embed = discord.Embed(
                         title="New Archetype Request",
-                        description=f"User: **{username}** (<@{discord_id}>)\nRequested archetype: **{new_archetype_name}**",
+                        description=f"User: **{username}** (<@{discord_id}>)\nRequested archetype: **{opponent_archetype}**",
                         color=discord.Color.orange()
                     )
                     alert_embed.add_field(name="Deck", value=selected_deck['name'], inline=True)
@@ -681,66 +683,83 @@ async def log_match(ctx):
                         "user_id": discord_id,
                         "deck_id": selected_deck['id'],
                         "deck_name": selected_deck['name'],
-                        "new_archetype": new_archetype_name,
+                        "new_archetype": opponent_archetype,
                         "match_id": match_response.data[0]['id']  # Store the match ID for updating
                     }
+        except Exception as e:
+            await ctx.send('An error occurred while logging the match. Please try again later.')
+            print(f"Error logging match: {e}")
             
     except asyncio.TimeoutError:
         await ctx.send("You took too long to respond. Please try logging the match again.")
 
 @match.command(name='history')
 @commands.guild_only()
-async def matchup_history(ctx, archetype):
-    guild_id = ctx.guild.id
+async def matchup_history(ctx):
+    # Step 1: Prompt for archetype
+    archetypes_response = supabase.table('deck_archetypes').select("*").execute()
+    archetypes = [a['name'] for a in archetypes_response.data]
+    msg = "Which archetype do you want a matchup history for?\n"
+    msg += "\n".join(f"{i+1}. {name}" for i, name in enumerate(archetypes))
+    await ctx.send(msg)
 
-    # Get all users from the guild
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        reply = await bot.wait_for('message', check=check, timeout=60.0)
+        idx = int(reply.content.strip()) - 1
+        if idx < 0 or idx >= len(archetypes):
+            await ctx.send("Invalid selection.")
+            return
+        selected_archetype = archetypes[idx]
+    except Exception:
+        await ctx.send("Invalid input or timeout.")
+        return
+
+    # Step 2: Get all users in the guild
     guild_members = [str(member.id) for member in ctx.guild.members]
     users_response = supabase.table('users').select("*").execute()
-
-    if not users_response.data:
-        await ctx.send(f"No users are registered.")
-        return
-
-    # Filter users who are members of the guild
     user_ids = [user['id'] for user in users_response.data if user['discord_id'] in guild_members]
 
-    if not user_ids:
-        await ctx.send(f"No registered users found in this guild.")
+    # Step 3: Get all decks of the selected archetype
+    decks_response = supabase.table('decks').select("*").in_("user_id", user_ids).execute()
+    # Find the archetype_id for the selected archetype
+    selected_archetype_id = None
+    for a in archetypes_response.data:
+        if a['name'] == selected_archetype:
+            selected_archetype_id = a['id']
+            break
+    deck_ids = [deck['id'] for deck in decks_response.data if deck.get('archetype_id') == selected_archetype_id]
+
+    if not deck_ids:
+        await ctx.send("No decks found for that archetype.")
         return
 
-    # Get decks matching the archetype and users in the guild
-    decks_response = supabase.table('decks').select("*").eq("archetype_id", archetype).in_("user_id", user_ids).execute()
-
-    if not decks_response.data:
-        await ctx.send(f"No decks found for archetype '{archetype}'.")
-        return
-
-    deck_ids = [deck['id'] for deck in decks_response.data]
-
-    # Get matches related to the filtered decks
+    # Step 4: Get all matches for those decks
     matches_response = supabase.table('matches').select("*").in_("deck_id", deck_ids).execute()
-
-    if not matches_response.data:
-        await ctx.send(f"No matches found for archetype '{archetype}'.")
-        return
-
     matches = matches_response.data
 
-    # Calculate wins and losses
-    wins = sum(1 for match in matches if match['result'] == 'Win')
-    losses = sum(1 for match in matches if match['result'] == 'Loss')
-
-    # Prepare the response message
-    response = f'Matchup history for archetype "{archetype}": {wins} wins and {losses} losses.\n\n'
-    response += 'Detailed matchups:\n'
+    # Step 5: Aggregate by opponent archetype
+    summary = {}
     for match in matches:
-        response += f'Player: {match["player"]}, Result: {match["result"]}, Opponent Archetype: {match["opponent_archetype"]}\n'
+        opp = match['opponent_archetype']
+        if opp not in summary:
+            summary[opp] = {'Win': 0, 'Loss': 0, 'Tie': 0}
+        summary[opp][match['result']] += 1
 
-    # Send the response to the user
-    await ctx.send(response)
-    print(f'Provided matchup history for archetype "{archetype}".')
-        
-        
+    # Step 6: Format output
+    output = f"Matchup History for {selected_archetype}:\n"
+    output += "Opponent | Win% | W-L-T\n"
+    output += "---------|------|------\n"
+    for opp, record in summary.items():
+        total = record['Win'] + record['Loss'] + record['Tie']
+        if total == 0:
+            continue
+        winrate = (record['Win'] + record['Tie']/3) / total * 100
+        output += f"{opp} | {winrate:.1f}% | {record['Win']}-{record['Loss']}-{record['Tie']}\n"
+    await ctx.send(f"```{output}```")
+
 ### TOOL GROUP ###
 @bot.group()
 async def tool(ctx):
