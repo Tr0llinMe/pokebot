@@ -41,7 +41,7 @@ class Pokebot(commands.Bot):
                 print(f'Failed to load {cog}: {str(e)}')
         
         # Load events
-        from util.events import setup
+        from utils.events import setup
         await setup(self)
         print('Successfully loaded events')
 

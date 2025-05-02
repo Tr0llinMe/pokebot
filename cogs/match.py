@@ -8,6 +8,7 @@ import json
 
 from database.supabase import UserRepository, DeckRepository, ArchetypeRepository, MatchRepository
 from utils.image import create_matchup_image
+from utils.events import pending_archetype_updates
 
 class MatchCommands(commands.Cog):
     def __init__(self, bot):

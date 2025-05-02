@@ -6,6 +6,7 @@ import json
 
 from database.supabase import UserRepository, DeckRepository, ArchetypeRepository
 from utils.deck_parser import extract_card_names, identify_archetype, format_decklist
+from utils.events import pending_archetype_updates
 
 class DeckCommands(commands.Cog):
     def __init__(self, bot):
@@ -127,7 +128,6 @@ class DeckCommands(commands.Cog):
                     await alert_message.add_reaction("✅")
                     
                     # Store for admin processing
-                    from util.events import pending_archetype_updates
                     pending_archetype_updates[alert_message.id] = {
                         "deck_id": deck['id'],
                         "user_id": discord_id,
