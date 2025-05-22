@@ -32,7 +32,8 @@ class Pokebot(commands.Bot):
             'cogs.deck',
             'cogs.match',
             'cogs.archetype',
-            'cogs.admin'
+            'cogs.admin',
+            'cogs.tool'
         ]:
             try:
                 await self.load_extension(cog)

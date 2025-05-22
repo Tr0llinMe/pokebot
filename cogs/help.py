@@ -22,6 +22,8 @@ class HelpCommands(commands.Cog):
             "🎮 Match Commands\n"
             "`!match log` - Log a match\n"
             "`!match history` - View matchup history\n\n"
+            "🔧 Tool Commands\n"
+            "`!tool mully` - Allows you to mulligan your deck\n\n"
             "❓ MISC Commands \n"
             "`!archetype list` - List all archetypes\n"
         )
