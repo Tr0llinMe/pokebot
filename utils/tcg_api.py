@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import re
 import shutil
 from pathlib import Path
+import time
 
 load_dotenv()
 
@@ -81,6 +82,9 @@ class TCGApi:
         api_set_code = None
         api_number = number
         
+        # Convert "Poke" to "Poké" in card name
+        card_name = card_name.replace("Poke", "Poké")
+        
         if set_code:
             # Try to map user set code to official set ID
             api_set_code = SETCODE_MAP.get(set_code.upper(), set_code)
@@ -98,24 +102,45 @@ class TCGApi:
         else:
             params = {"q": f'name:"{card_name}"'}
             
-        try:
-            response = requests.get(f"{cls.BASE_URL}/cards", headers=headers, params=params)
-            response.raise_for_status()
-            data = response.json()
-            if data["data"]:
-                return data["data"][0]
-            # Fallback: try by name only if set/number not found
-            if api_set_code and api_number:
-                params = {"q": f'name:"{card_name}"'}
-                response = requests.get(f"{cls.BASE_URL}/cards", headers=headers, params=params)
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(
+                    f"{cls.BASE_URL}/cards",
+                    headers=headers,
+                    params=params,
+                    timeout=10  # Add timeout
+                )
                 response.raise_for_status()
                 data = response.json()
                 if data["data"]:
                     return data["data"][0]
-            return None
-        except Exception as e:
-            print(f"Error fetching card {card_name}: {str(e)}")
-            return None
+                # Fallback: try by name only if set/number not found
+                if api_set_code and api_number:
+                    params = {"q": f'name:"{card_name}"'}
+                    response = requests.get(
+                        f"{cls.BASE_URL}/cards",
+                        headers=headers,
+                        params=params,
+                        timeout=10
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    if data["data"]:
+                        return data["data"][0]
+                return None
+            except requests.Timeout:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                print(f"Timeout fetching card {card_name} after {max_retries} attempts")
+                return None
+            except Exception as e:
+                print(f"Error fetching card {card_name}: {str(e)}")
+                return None
 
     @classmethod
     def is_basic_pokemon(cls, card_data: Dict) -> bool:
@@ -163,6 +188,46 @@ class TCGApi:
         if not match:
             return card_line.strip(), None, None
         full_name = match.group(2).strip()
+
+        # Normalize special characters
+        special_chars = {
+            'é': 'e',
+            'É': 'E',
+            'è': 'e',
+            'È': 'E',
+            'ê': 'e',
+            'Ê': 'E',
+            'ë': 'e',
+            'Ë': 'E',
+            'à': 'a',
+            'À': 'A',
+            'â': 'a',
+            'Â': 'A',
+            'ä': 'a',
+            'Ä': 'A',
+            'î': 'i',
+            'Î': 'I',
+            'ï': 'i',
+            'Ï': 'I',
+            'ô': 'o',
+            'Ô': 'O',
+            'ö': 'o',
+            'Ö': 'O',
+            'ù': 'u',
+            'Ù': 'U',
+            'û': 'u',
+            'Û': 'U',
+            'ü': 'u',
+            'Ü': 'U',
+            'ç': 'c',
+            'Ç': 'C',
+            'ñ': 'n',
+            'Ñ': 'N'
+        }
+        
+        # Replace special characters in the full name
+        for special, normal in special_chars.items():
+            full_name = full_name.replace(special, normal)
 
         # Normalize basic energy cards: only keep 'Basic [Type] Energy'
         if "Basic" in full_name and "Energy" in full_name:
