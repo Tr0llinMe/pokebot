@@ -95,13 +95,21 @@ class HandSimulator:
             prize_cards, deck = self.draw_cards(deck, 6)
             
             # Draw for turn (1 card)
-            draw_for_turn, _ = self.draw_cards(deck, 1)
+            draw_for_turn, deck = self.draw_cards(deck, 1)
+
+            # Squak/Iono draw (6 cards)
+            squak_draw, deck = self.draw_cards(deck, 6)
+
+            # Professor Research draw (1 card)
+            prof_draw, _ = self.draw_cards(deck, 1)
             
             return {
                 'mulligans': mulligans,
                 'setup_hand': setup_hand,
                 'prize_cards': prize_cards,
-                'draw_for_turn': draw_for_turn
+                'draw_for_turn': draw_for_turn,
+                'squak_draw': squak_draw,
+                'prof_draw': prof_draw
             }
         except Exception as e:
             print(f"Error in simulate_hand: {e}")
@@ -113,10 +121,13 @@ class HandSimulator:
             raise ValueError("Number of simulations must be positive")
             
         total_mulligans = 0
+        games_with_mulligan = 0
         card_appearances = {
             "setup_hand": Counter(),
             "prize_cards": Counter(),
-            "draw_for_turn": Counter()
+            "draw_for_turn": Counter(),
+            "squak_draw": Counter(),
+            "prof_draw": Counter()
         }
         
         # Send initial progress message
@@ -126,6 +137,8 @@ class HandSimulator:
             for i in range(num_simulations):
                 sim_result = self.simulate_hand()
                 total_mulligans += sim_result["mulligans"]
+                if sim_result["mulligans"] > 0:
+                    games_with_mulligan += 1
                 
                 # Update card appearances
                 for category in card_appearances:
@@ -138,6 +151,7 @@ class HandSimulator:
             return {
                 "total_simulations": num_simulations,
                 "total_mulligans": total_mulligans,
+                "games_with_mulligan": games_with_mulligan,
                 "card_appearances": card_appearances
             }
         except Exception as e:
@@ -154,7 +168,9 @@ class HandSimulator:
         if deck_name:
             report.append(f"Deck: {deck_name}")
         report.append(f"Total Simulations: {results['total_simulations']}")
-        report.append(f"Average Mulligans: {results['total_mulligans'] / results['total_simulations']:.2f}")
+        # Show Mulligan Rate as a percentage
+        mulligan_rate = (results.get('games_with_mulligan', 0) / results['total_simulations']) * 100
+        report.append(f"Mulligan Rate: {mulligan_rate:.1f}%")
         
         # Helper function to format card frequency
         def format_card_freq(counter: Counter, title: str):
@@ -166,6 +182,8 @@ class HandSimulator:
         format_card_freq(results['card_appearances']['setup_hand'], 'Setup Hand')
         format_card_freq(results['card_appearances']['prize_cards'], 'Prize Cards')
         format_card_freq(results['card_appearances']['draw_for_turn'], 'Draw for Turn')
+        format_card_freq(results['card_appearances']['squak_draw'], 'Squawkabilly/Iono Draw')
+        format_card_freq(results['card_appearances']['prof_draw'], '+1 for Professor Research')
         
         # Get archetype image if available
         archetype_image = None

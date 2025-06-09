@@ -287,15 +287,22 @@ class ToolCommands(commands.Cog):
             # Run simulations with progress updates
             results = await simulator.run_simulations(1000)  # Run 1000 simulations
 
-            # Generate and send unified report image with top cards for each category
+            # Generate and send main report image (setup hand, prize cards, draw for turn)
             report_text, _ = simulator.generate_report(results, deck_name=deck['name'])  # Pass deck name
-            # Only use the updated categories: setup_hand, prize_cards, draw_for_turn
-            categories = ["setup_hand", "prize_cards", "draw_for_turn"]
-            category_titles = {
+            # Main simulation categories
+            main_categories = ["setup_hand", "prize_cards", "draw_for_turn"]
+            main_category_titles = {
                 "setup_hand": "Setup Hand",
                 "prize_cards": "Prize Cards",
                 "draw_for_turn": "Draw for Turn"
             }
+            # Additional draws categories
+            additional_categories = ["squak_draw", "prof_draw"]
+            additional_category_titles = {
+                "squak_draw": "Squawkabilly/Iono Draw",
+                "prof_draw": "If You Draw 1 for Professor Research"
+            }
+
             # Prepare data for each category
             top_n_text = 10
             top_n_images = 4
@@ -312,122 +319,153 @@ class ToolCommands(commands.Cog):
             card_width = 140  # Smaller card image width
             card_height = 196 # Smaller card image height
             spacing = 10
-            # --- Enhanced Top Section: Centered and Larger ---
-            # Extract only summary lines (title, archetype, total simulations, average mulligans)
-            summary_lines = []
-            lines = report_text.split('\n')
-            for line in lines:
-                if line.strip() == '' or any(cat in line for cat in ["Setup Hand:", "Prize Cards:", "Draw for Turn:"]):
-                    break
-                summary_lines.append(line)
-            # Prepare per-category stats (top 10, no percentage)
-            category_stats = {cat: [] for cat in categories}
-            current_cat = None
-            for line in lines:
-                for cat in categories:
-                    if line.strip().startswith(category_titles[cat]):
-                        current_cat = cat
+
+            # Function to create report image
+            def create_report_image(categories, category_titles, title):
+                # Extract only summary lines (title, archetype, total simulations, average mulligans)
+                summary_lines = []
+                lines = report_text.split('\n')
+                for line in lines:
+                    if line.strip() == '' or any(cat in line for cat in category_titles.values()):
                         break
-                else:
-                    if current_cat and line.strip() and not line.strip().endswith(":"):
-                        # Remove percentage if present
-                        stat = line
-                        if ' times (' in stat:
-                            stat = stat.split(' times (')[0] + ' times'
-                        category_stats[current_cat].append(stat)
-            # Font sizes
-            title_font_size = 40
-            summary_font_size = 28
-            try:
-                title_font = ImageFont.truetype(font_path, title_font_size)
-            except:
-                title_font = ImageFont.load_default()
-            try:
-                summary_font = ImageFont.truetype(font_path, summary_font_size)
-            except:
-                summary_font = ImageFont.load_default()
-            total_width = text_width + spacing + card_width * top_n_images + left_margin * 2
-            sprite_height = sprite_size
-            title_height = title_font_size + 10
-            summary_height = len(summary_lines[1:]) * (summary_font_size + 6)
-            top_section_height = sprite_height + title_height + summary_height + 40
-            num_categories = len(categories)
-            category_block_height = max(card_height, line_height * (top_n_text + 1)) + spacing
-            total_height = top_section_height + num_categories * category_block_height + spacing * (num_categories + 1)
-            img = Image.new('RGB', (total_width, total_height), 'white')
-            draw = ImageDraw.Draw(img)
-            y = 20
-            if archetype_image:
-                sprite_x = (total_width - sprite_size) // 2
-                img.paste(archetype_image, (sprite_x, y), archetype_image)
-                y += sprite_height + 10
-            title_text = summary_lines[0]
-            title_bbox = title_font.getbbox(title_text)
-            title_w = title_bbox[2] - title_bbox[0]
-            draw.text(((total_width - title_w) // 2, y), title_text, fill='black', font=title_font)
-            y += title_font_size + 10
-            for line in summary_lines[1:]:
-                line_bbox = summary_font.getbbox(line)
-                line_w = line_bbox[2] - line_bbox[0]
-                draw.text(((total_width - line_w) // 2, y), line, fill='black', font=summary_font)
-                y += summary_font_size + 6
-            y += 20
-            # Prepare top card images for each category (top 4, no blanks)
-            category_images = {}
-            for category in categories:
-                top_cards = results["card_appearances"][category].most_common(top_n_images)
-                card_images = []
-                for card_name, _ in top_cards:
-                    card_data = None
-                    display_name = card_name.replace('Poke', 'Poké')
-                    if card_name.startswith('Basic') and 'Energy' in card_name:
-                        match = re.match(r'Basic \{([A-Z])\} Energy', card_name)
-                        if match:
-                            symbol = '{' + match.group(1) + '}'
-                            energy_type = energy_symbol_map.get(symbol, None)
-                            if energy_type:
-                                normalized_name = f'Basic {energy_type} Energy'
-                                card_data = self.tcg_api.get_card_by_name(normalized_name)
-                                display_name = normalized_name
+                    summary_lines.append(line)
+                # Prepare per-category stats (top 10, no percentage)
+                category_stats = {cat: [] for cat in categories}
+                current_cat = None
+                for line in lines:
+                    for cat in categories:
+                        if line.strip().startswith(category_titles[cat]):
+                            current_cat = cat
+                            break
+                    else:
+                        if current_cat and line.strip() and not line.strip().endswith(":"):
+                            # Remove percentage if present
+                            stat = line
+                            if ' times (' in stat:
+                                stat = stat.split(' times (')[0] + ' times'
+                            category_stats[current_cat].append(stat)
+                    # Stop collecting if we hit a category not in this image
+                    if current_cat and not any(line.strip().startswith(category_titles[c]) for c in categories) and any(line.strip().endswith(":") for c in category_titles if category_titles[c] not in [category_titles[cat] for cat in categories]):
+                        current_cat = None
+
+                # Font sizes
+                title_font_size = 40
+                summary_font_size = 28
+                try:
+                    title_font = ImageFont.truetype(font_path, title_font_size)
+                except:
+                    title_font = ImageFont.load_default()
+                try:
+                    summary_font = ImageFont.truetype(font_path, summary_font_size)
+                except:
+                    summary_font = ImageFont.load_default()
+
+                total_width = text_width + spacing + card_width * top_n_images + left_margin * 2
+                sprite_height = sprite_size
+                title_height = title_font_size + 10
+                summary_height = len(summary_lines[1:]) * (summary_font_size + 6)
+                top_section_height = sprite_height + title_height + summary_height + 40
+                num_categories = len(categories)
+                category_block_height = max(card_height, line_height * (top_n_text + 1)) + spacing
+                total_height = top_section_height + num_categories * category_block_height + spacing * (num_categories + 1)
+
+                img = Image.new('RGB', (total_width, total_height), 'white')
+                draw = ImageDraw.Draw(img)
+
+                y = 20
+                if archetype_image:
+                    sprite_x = (total_width - sprite_size) // 2
+                    img.paste(archetype_image, (sprite_x, y), archetype_image)
+                    y += sprite_height + 10
+
+                # Draw title
+                title_text = title
+                title_bbox = title_font.getbbox(title_text)
+                title_w = title_bbox[2] - title_bbox[0]
+                draw.text(((total_width - title_w) // 2, y), title_text, fill='black', font=title_font)
+                y += title_font_size + 10
+
+                # Draw summary lines
+                for line in summary_lines[1:]:
+                    line_bbox = summary_font.getbbox(line)
+                    line_w = line_bbox[2] - line_bbox[0]
+                    draw.text(((total_width - line_w) // 2, y), line, fill='black', font=summary_font)
+                    y += summary_font_size + 6
+
+                y += 20
+
+                # Draw each category block
+                for idx, category in enumerate(categories):
+                    # Always draw the top 10 stats, even if empty
+                    draw.text((left_margin, y), category_titles[category] + ':', fill='black', font=font)
+                    stats = category_stats[category][:top_n_text]
+                    if not stats:
+                        stats = ["(No data)"]
+                    for i, stat in enumerate(stats):
+                        draw.text((left_margin, y + (i + 1) * line_height), stat, fill='black', font=font)
+
+                    # Get and draw card images
+                    top_cards = results["card_appearances"][category].most_common(top_n_images)
+                    card_images = []
+                    for card_name, _ in top_cards:
+                        card_data = None
+                        display_name = card_name.replace('Poke', 'Poké')
+                        if card_name.startswith('Basic') and 'Energy' in card_name:
+                            match = re.match(r'Basic \{([A-Z])\} Energy', card_name)
+                            if match:
+                                symbol = '{' + match.group(1) + '}'
+                                energy_type = energy_symbol_map.get(symbol, None)
+                                if energy_type:
+                                    normalized_name = f'Basic {energy_type} Energy'
+                                    card_data = self.tcg_api.get_card_by_name(normalized_name)
+                                    display_name = normalized_name
+                                else:
+                                    card_data = self.tcg_api.get_card_by_name(card_name)
+                                    display_name = card_name
                             else:
                                 card_data = self.tcg_api.get_card_by_name(card_name)
                                 display_name = card_name
                         else:
-                            card_data = self.tcg_api.get_card_by_name(card_name)
-                            display_name = card_name
-                    else:
-                        card_entry = next((entry for entry in card_entries if entry[0] == card_name), None)
-                        if card_entry:
-                            api_name = card_entry[0].replace('Poke', 'Poké')
-                            card_data = self.tcg_api.get_card_by_name(api_name, card_entry[1], card_entry[2])
-                            if not card_data:
-                                card_data = self.tcg_api.get_card_by_name(api_name)
-                    if card_data:
-                        image_url = self.tcg_api.get_card_image_url(card_data)
-                        if image_url:
-                            try:
-                                response = requests.get(image_url)
-                                if response.status_code == 200:
-                                    card_image = Image.open(io.BytesIO(response.content)).resize((card_width, card_height))
-                                    card_images.append(card_image)
-                            except Exception as e:
-                                print(f"Error loading card image: {e}")
-                category_images[category] = card_images
-            # Draw each category block
-            for idx, category in enumerate(categories):
-                draw.text((left_margin, y), category_titles[category] + ':', fill='black', font=font)
-                for i, stat in enumerate(category_stats[category][:top_n_text]):
-                    draw.text((left_margin, y + (i + 1) * line_height), stat, fill='black', font=font)
-                images = category_images[category]
-                for j, card_img in enumerate(images):
-                    x_img = text_width + spacing + left_margin + j * card_width
-                    y_img = y
-                    img.paste(card_img, (x_img, y_img))
-                y += category_block_height + spacing
-            img_path = "temp_report.png"
-            img.save(img_path)
-            await ctx.send(file=discord.File(img_path))
-            os.remove(img_path)
+                            card_entry = next((entry for entry in card_entries if entry[0] == card_name), None)
+                            if card_entry:
+                                api_name = card_entry[0].replace('Poke', 'Poké')
+                                card_data = self.tcg_api.get_card_by_name(api_name, card_entry[1], card_entry[2])
+                                if not card_data:
+                                    card_data = self.tcg_api.get_card_by_name(api_name)
+                        if card_data:
+                            image_url = self.tcg_api.get_card_image_url(card_data)
+                            if image_url:
+                                try:
+                                    response = requests.get(image_url)
+                                    if response.status_code == 200:
+                                        card_image = Image.open(io.BytesIO(response.content)).resize((card_width, card_height))
+                                        card_images.append(card_image)
+                                except Exception as e:
+                                    print(f"Error loading card image: {e}")
+
+                    for j, card_img in enumerate(card_images):
+                        x_img = text_width + spacing + left_margin + j * card_width
+                        y_img = y
+                        img.paste(card_img, (x_img, y_img))
+
+                    y += category_block_height + spacing
+
+                return img
+
+            # Create and send main report image
+            main_img = create_report_image(main_categories, main_category_titles, "Main Simulation Report")
+            main_img_path = "temp_main_report.png"
+            main_img.save(main_img_path)
+            await ctx.send(file=discord.File(main_img_path))
+            os.remove(main_img_path)
+
+            # Create and send additional draws report image
+            additional_img = create_report_image(additional_categories, additional_category_titles, "Additional Draws Report")
+            additional_img_path = "temp_additional_report.png"
+            additional_img.save(additional_img_path)
+            await ctx.send(file=discord.File(additional_img_path))
+            os.remove(additional_img_path)
+
         except ValueError as e:
             await ctx.send(f"Error: {str(e)}")
         except Exception as e:
