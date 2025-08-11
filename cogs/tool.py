@@ -300,7 +300,7 @@ class ToolCommands(commands.Cog):
             additional_categories = ["squak_draw", "prof_draw"]
             additional_category_titles = {
                 "squak_draw": "Squawkabilly/Iono Draw",
-                "prof_draw": "If You Draw 1 for Professor Research"
+                "prof_draw": "Draw 1 if You Used Professor Research"
             }
 
             # Prepare data for each category
@@ -398,6 +398,9 @@ class ToolCommands(commands.Cog):
                 for idx, category in enumerate(categories):
                     # Always draw the top 10 stats, even if empty
                     draw.text((left_margin, y), category_titles[category] + ':', fill='black', font=font)
+                    
+                    #print(f"Category: {category}, Stats: {category_stats[category]}")
+                    
                     stats = category_stats[category][:top_n_text]
                     if not stats:
                         stats = ["(No data)"]

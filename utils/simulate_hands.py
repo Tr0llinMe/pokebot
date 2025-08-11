@@ -144,8 +144,8 @@ class HandSimulator:
                 for category in card_appearances:
                     card_appearances[category].update(card[0] for card in sim_result[category])
                 
-                # Send progress update every 50 simulations or on the last one
-                if (i + 1) % 50 == 0 or i == num_simulations - 1:
+                # Send progress update every 100 simulations or on the last one
+                if (i + 1) % 100 == 0 or i == num_simulations - 1:
                     await self.send_progress(i + 1, num_simulations)
             
             return {
@@ -183,7 +183,7 @@ class HandSimulator:
         format_card_freq(results['card_appearances']['prize_cards'], 'Prize Cards')
         format_card_freq(results['card_appearances']['draw_for_turn'], 'Draw for Turn')
         format_card_freq(results['card_appearances']['squak_draw'], 'Squawkabilly/Iono Draw')
-        format_card_freq(results['card_appearances']['prof_draw'], '+1 for Professor Research')
+        format_card_freq(results['card_appearances']['prof_draw'], 'Draw 1 if You Used Professor Research')
         
         # Get archetype image if available
         archetype_image = None
